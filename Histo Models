@@ -1,0 +1,1117 @@
+#Cavalli and NMB Models
+
+require(methylClass)
+require(UBL)
+require(caret)
+require(randomForest) 
+require(dplyr) 
+
+
+#Function for SMOTE within the methylClass package- with adjustments
+topvarfeatures <- function(betasmat,
+                           topfeaturenumber = NULL){
+  
+  limit <- min(ncol(betasmat), topfeaturenumber)
+  betas.filtered <- betasmat[,order(apply(betasmat, 2, sd), decreasing = TRUE)[1:limit]]
+  
+  if(ncol(betas.filtered) < 10){
+    sigmat <- betasmat
+  }else{
+    sigmat <- betas.filtered
+  }
+  
+  return(sigmat)
+  
+}
+
+createnames <- function(rawnames){
+  
+  reversenames <- FALSE
+  if(sum(grepl(pattern = '-', x = rawnames)) > 0){
+    
+    rawnames <- gsub(pattern = '-', replacement = '___', x = rawnames)
+    reversenames <- TRUE
+  }
+  
+  
+  newnames <- make.names(names = rawnames, unique = TRUE)
+  
+  
+  newnames[newnames %in% rawnames] <- ''
+  
+  
+  suffix <- gsub(pattern = '^.*\\.', replacement = '', x = newnames)
+  
+  
+  suffix <- gsub(pattern = '^X[0-9].*', replacement = '', x = suffix)
+  
+  
+  suffix[suffix %in% rawnames] <- ''
+  suffix <- paste0('.', suffix)
+  suffix[suffix == '.'] <- ''
+  newnames <- paste0(rawnames, suffix)
+  
+  if(reversenames == TRUE){
+    newnames <- gsub(pattern = '___', replacement = '-', x = newnames)
+  }
+  
+  return(newnames)
+  
+}
+
+balancesampling <- function(dat, 
+                            labels, 
+                            topfeaturenumber = 50000, 
+                            cutoff = 10, 
+                            downsampling = FALSE, 
+                            sampleseed = 1234, 
+                            k = 5, 
+                            adjustbetas = TRUE){
+  
+  labellevels <- NULL
+  
+  labelordered <- FALSE
+  
+  if(is.factor(labels)){
+    labellevels <- levels(labels)
+    
+    labelordered <- is.ordered(labels)
+  }
+  
+  dat <- topvarfeatures(betasmat = dat, topfeaturenumber = topfeaturenumber)
+  
+  classsizes <- table(as.character(labels))
+  
+  names(labels) <- row.names(dat)
+  
+  i <- 1
+  for(i in 1:length(classsizes)){
+    
+    classname <- names(classsizes)[i]
+    
+    classsamples <- names(labels)[labels == classname]
+    
+    if(length(classsamples) > cutoff){
+      
+      if(downsampling == TRUE){
+        
+        set.seed(sampleseed + i - 1)
+        subsamples <- sample(x = classsamples, size = cutoff, replace = FALSE)
+        subdat <- dat[subsamples, , drop = FALSE]
+        sublabels <- rep(classname, nrow(subdat))
+        names(sublabels) <- row.names(subdat) 
+        
+      }else{
+        
+        subsamples <- classsamples
+        sublabels <- labels[subsamples]
+        subdat <- dat[subsamples, , drop = FALSE]
+        
+      }
+      
+    }else if(length(classsamples) < cutoff){
+      
+      if(length(classsamples) > 1){
+        
+        subdat <- dat[classsamples, , drop = FALSE]
+        
+        knnres <- dbscan::kNN(x = subdat, k = min(k, nrow(subdat) - 1))
+        knnres <- knnres$id
+        knnresidx <- seq(1, nrow(knnres)*ncol(knnres), by = 1)
+        knnresidxmat <- matrix(data = knnresidx, 
+                               nrow = nrow(knnres), 
+                               byrow = FALSE)
+        row.names(knnresidxmat) <- 1:nrow(knnresidxmat)
+        colnames(knnresidxmat) <- 1:ncol(knnresidxmat)
+        
+        
+        
+        set.seed(sampleseed + i - 1)
+        
+        sampledidx <- sample(x = knnresidx, size = cutoff - length(classsamples), replace = TRUE)
+        
+        smoteidx <- do.call(rbind, 
+                            lapply(X = sampledidx, 
+                                   FUN = function(x){which(knnresidxmat == x, arr.ind = TRUE)}))
+        row.names(smoteidx) <- 1:nrow(smoteidx)
+        
+        set.seed(sampleseed + i - 1)
+        zetas <- runif(nrow(smoteidx))
+        
+        
+        synthesizeddat <- lapply(X = seq(1:nrow(smoteidx)), 
+                                 FUN = function(x){subdat[row.names(knnres)[smoteidx[x, 1]],] + 
+                                     zetas[x]*(subdat[knnres[smoteidx[x, 1], smoteidx[x, 2]],] - 
+                                                 subdat[row.names(knnres)[smoteidx[x, 1]],])})
+        names(synthesizeddat) <- row.names(knnres)[smoteidx[,1]]
+        
+        synthesizeddat <- do.call(rbind, synthesizeddat)
+        
+        
+        subdat <- rbind(subdat, synthesizeddat)
+        
+        row.names(subdat) <- createnames(rawnames = row.names(subdat))
+        
+        sublabels <- rep(classname, nrow(subdat))
+        names(sublabels) <- row.names(subdat)
+        
+      }else{
+        
+        subdat <- dat
+        
+        knnres <- dbscan::kNN(x = subdat, k = min(k, nrow(subdat) - 1))
+        
+        mindist <- min(knnres$dist[knnres$dist > 0])
+        mindistidx <- which(knnres$dist == mindist, arr.ind = TRUE)
+        
+        difference <- subdat[knnres$id[mindistidx[1, 1], mindistidx[1, 2]],] - 
+          subdat[row.names(knnres$id)[mindistidx[1, 1]],]
+        
+        set.seed(sampleseed + i - 1)
+        zetas <- runif(cutoff - length(classsamples))
+        
+        synthesizeddat <- lapply(X = 1:length(zetas), 
+                                 FUN = function(x){subdat[classsamples,] + zetas[x]*difference})
+        
+        names(synthesizeddat) <- rep(classsamples, length(synthesizeddat))
+        
+        synthesizeddat <- do.call(rbind, synthesizeddat)
+        
+        subdat <- rbind(subdat[classsamples, , drop = FALSE], synthesizeddat)
+        
+        row.names(subdat) <- createnames(rawnames = row.names(subdat))
+        
+        sublabels <- rep(classname, nrow(subdat))
+        names(sublabels) <- row.names(subdat)
+        
+      }
+      
+      
+      
+    }else{
+      
+      sublabels <- labels[classsamples]
+      subdat <- dat[classsamples, , drop = FALSE]
+      
+    }
+    
+    if(i == 1){
+      
+      subdats <- subdat
+      sublabelses <- sublabels
+      
+    }else{
+      
+      subdats <- rbind(subdats, subdat)
+      sublabelses <- c(sublabelses, sublabels)
+      
+    }
+    
+  }
+  
+  if(adjustbetas == TRUE){
+    
+    minvalue <- min(subdats[subdats > 0])
+    maxvalue <- max(subdats[subdats < 1])
+    
+    subdats[subdats <= 0] <- minvalue
+    subdats[subdats >= 1] <- maxvalue
+    
+  }
+  
+  if(!is.null(labellevels)){
+    
+    sublabelses <- factor(sublabelses, levels = labellevels, ordered = labelordered)
+    
+  }
+  
+  res <- list(dat = subdats, 
+              labels = sublabelses)
+  
+  return(res)
+  
+} 
+
+####Datasets
+
+##Cavalli
+
+cavalli450k<-readRDS("~/450k/Cavalli/Cavalli_450k_betas.rds")
+
+cavalli<-as.data.frame(t(cavalli450k))
+
+rownames(cavalli)<-as.factor(rownames(cavalli))
+
+pheno<-read.csv("~/450k/Cavalli/Cavalli-test.csv")
+
+cavalli$histo<-as.factor(pheno$Histology)
+
+cavalli$mol.grp<-as.factor(pheno$Sub.group)
+
+molgrp_levels_cavalli<-levels(cavalli$mol.grp)
+cavalli$mol.grp<-as.numeric(as.factor(cavalli$mol.grp))
+cavalli_molgrp_mapping<-data.frame(molgrp_levels_cavalli, unique(cavalli$mol.grp)) 
+
+sample_IDs_levels_cavalli<-levels(as.factor(row.names(cavalli))) 
+sample_IDs_cavalli<-row.names(cavalli) 
+row.names(cavalli)<-as.numeric(as.factor(sample_IDs_cavalli))
+sample_IDs_cavalli<-as.data.frame(sample_IDs_levels_cavalli,seq_along(row.names(cavalli)))
+
+
+cavalli<-cavalli[!is.na(cavalli$histo),]
+
+
+cavalli$histo <- gsub("Classic", "CLA", cavalli$histo)
+cavalli$histo <- gsub("Desmoplastic", "DN", cavalli$histo)
+
+cavalli$histo<-as.factor(cavalli$histo)
+
+#Stratified Sampling 
+stratified_cavalli <- as.data.frame(cavalli %>%
+                                  group_by(histo, mol.grp) %>% 
+                                  slice_sample(prop = 0.8)) 
+
+test_cavalli <- setdiff(cavalli, stratified_cavalli)
+
+cavalli<-cavalli[,-473866] 
+
+stratified_cavalli<-stratified_cavalli[,-473866]
+
+test_cavalli<-test_cavalli[-473866] 
+
+###NMB
+
+NMB450k<-readRDS("~/NMB/NMBTC_450k_betas.rds") 
+
+NMB_450k<-read.csv("~/NMB_Final_Cohort.csv") 
+
+NMB_450k<-NMB_450k[NMB_450k$Platform == "450K",] 
+
+NMB<-as.data.frame(t(NMB450k)) 
+
+rownames(NMB)<-as.factor(rownames(NMB)) 
+
+NMB$histo<- as.factor(NMB_450k$CPR_Histology) 
+
+NMB$mol.grp<-as.factor(NMB_450k$Sub.group.called.7grp.)
+
+NMB<-NMB[NMB$histo != "NOS",]
+ 
+NMB$histo <- droplevels(NMB$histo)
+
+NMB_molgrp_levels<-levels(NMB$molgrp)
+NMB$molgrp<-as.numeric(as.factor(NMB$molgrp))
+NMB_molgrp_mapping<-data.frame(NMB_molgrp_levels, unique(NMB$molgrp)) 
+
+
+sample_IDs_levels_NMB<-levels(as.factor(row.names(NMB))) 
+sample_IDs_NMB<-row.names(NMB) 
+row.names(NMB)<-as.numeric(as.factor(sample_IDs_NMB))
+sample_IDs_NMB<-as.data.frame(sample_IDs_levels_NMB,seq_along(row.names(NMB))) 
+
+
+stratified_NMB <- as.data.frame(NMB %>%
+                                  group_by(histo, mol.grp) %>% 
+                                  slice_sample(prop = 0.8)) 
+
+# The remaining 20% 
+test_NMB <- setdiff(NMB, stratified_NMB)
+
+NMB<-NMB[,-473865] 
+
+stratified_NMB<-stratified_NMB[,-473865] 
+
+test_NMB<-test_NMB[,-473865] 
+
+
+##Models trained with Cavalli
+
+#Balancing with SMOTE- before stratified sampling
+
+#UBL Package
+
+target_samples<-max(table(cavalli$histo))
+
+class_perc<-sapply(table(cavalli$histo), function(x) { if(x == target_samples){ return(1)
+  
+}else{return(target_samples/x)}})
+
+class_perc
+
+balanced_cavalli<-SmoteClassif(histo~.,cavalli, C.perc = as.list(class_perc))
+
+
+#Balancing with SMOTE- after stratified sampling
+
+target_samples<-max(table(stratified_cavalli$histo))
+
+class_perc<-sapply(table(stratified_cavalli$histo), function(x) { if(x == target_samples){ return(1)
+  
+}else{return(target_samples/x)}}) 
+
+class_perc
+
+balanced_stracavalli<-SmoteClassif(histo~.,stratified_cavalli, C.perc = as.list(class_perc))
+
+
+####MethylClass Models
+
+###To check and compare performance of algorithms
+
+
+##Prior to balancing 
+
+#RF
+#maincv(y.. = cavalli$histo,betas..= cavalli,n.cv.folds = 5,normalcv = TRUE,out.path = "cavalli_RFCV",out.fname = "cavalli_RFFold",method="RF",seed = 12)
+
+#Cavalli_RFres<-maincalibration(y.. = cavalli$histo,load.path = "cavalli_RFCV",load.fname = "cavalli_RFFold",normalcv = TRUE,algorithm = "RF",setseed = 12)
+
+#write.csv(Cavalli_RFres,paste0("Cavalli_RFres.csv"))
+
+#SVM
+#maincv(y.. = cavalli$histo,betas..= cavalli,n.cv.folds = 5,normalcv = TRUE,out.path = "cavalli_SVMCV",out.fname = "cavalli_SVMFold",method="SVM",seed = 12)
+
+#Cavalli_SVMres<-maincalibration(y.. = cavalli$histo,load.path = "cavalli_SVMCV",load.fname = "cavalli_SVMFold",normalcv = TRUE,algorithm = "SVM",setseed = 12)
+
+#write.csv(Cavalli_SVMres,paste0("Cavalli_SVMres.csv"))
+
+
+##After balancing with SMOTE
+
+#RF
+
+#maincv(y.. = balanced_cavalli$histo,betas..= balanced_cavalli,n.cv.folds = 5,normalcv = TRUE,out.path = "CB_RFCV",out.fname = "CB_CVFold",method="RF",seed = 12)
+
+#CB_RFres<-maincalibration(y.. = balanced_cavalli$histo,load.path = "CB_RFCV",load.fname = "CB_CVFold",normalcv = TRUE,algorithm = "RF",setseed = 12)
+
+#write.csv(CB_RFres,paste0("CB_Rfres.csv")) 
+
+#SVM
+
+#maincv(y.. = balanced_cavalli$histo,betas..= balanced_cavalli,n.cv.folds = 5,normalcv = TRUE,out.path = "CB_SVMCV",out.fname = "CB_SVMFold",method="SVM",seed = 12)
+
+#CB_SVMres<-maincalibration(y.. = balanced_cavalli$histo,load.path = "CB_SVMCV",load.fname = "CB_SVMFold",normalcv = TRUE,algorithm = "SVM",setseed = 12)
+
+#write.csv(CB_SVMres,paste0("CB_SVMres.csv")) 
+
+
+##After balancing with SMOTE- Stratified Sampling 
+
+#maincv(y.. = balanced_stracavalli$histo,betas..= balanced_stracavalli,n.cv.folds = 5,normalcv = TRUE,out.path = "BSC_RFCV",out.fname = "BSC_CVFold",method="RF",seed = 12)
+
+#BSC_RFres<-maincalibration(y.. = balanced_stracavalli$histo,load.path = "BSC_RFCV",load.fname = "BSC_CVFold",normalcv = TRUE,algorithm = "RF",setseed = 12)
+
+#write.csv(BSC_RFres,paste0("BSC_Rfres.csv")) 
+
+#SVM
+
+#maincv(y.. = balanced_stracavalli$histo,betas..= balanced_stracavalli,n.cv.folds = 5,normalcv = TRUE,out.path = "BSC_SVMCV",out.fname = "BSC_SVMFold",method="SVM",seed = 12)
+
+#BSC_SVMres<-maincalibration(y.. = balanced_stracavalli$histo,load.path = "BSC_SVMCV",load.fname = "BSC_SVMFold",normalcv = TRUE,algorithm = "SVM",setseed = 12)
+
+#write.csv(BSC_SVMres,paste0("BSC_SVMres.csv")) 
+
+
+###Training the model
+
+##RF
+
+#Before Balancing
+
+RF_cavalli<-maintrain (y.. = cavalli$histo, betas.. = as.data.frame(cavalli[,1:473864]), subset.CpGs = "limma",seed = 492, method = "RF",calibrationmethod = "LR",savefeaturenames = TRUE,confoundings = cavalli$molgrp, cores = 10) 
+
+#Balanced with SMOTE
+
+RF_BC<-maintrain(y.. = balanced_cavalli$histo, betas.. = as.data.frame(balanced_cavalli[,1:473864]), subset.CpGs = "limma", seed = 482,savefeaturenames = TRUE, method = "RF",calibrationmethod = "LR",cores = 20)
+
+#Balanced with SMOTE after stratified sampling
+
+RF_BSC<-maintrain(y.. = balanced_stracavalli$histo, betas.. = as.data.frame(balanced_stracavalli[,1:473864]), subset.CpGs = "limma",seed = 442,savefeaturenames = TRUE, method = "RF",calibrationmethod = "LR",cores = 20)
+
+##SVM
+
+#Before Balancing
+
+SVM_cavalli<-maintrain(y.. = cavalli$histo, betas.. = as.data.frame(cavalli[,1:473864]), subset.CpGs = "limma",seed = 42,savefeaturenames = TRUE, method = "SVM",calibrationmethod = "LR",cores = 20) 
+
+#Balanced with SMOTE
+
+SVM_BC<-maintrain(y.. = balanced_cavalli$histo, betas.. = as.data.frame(balanced_cavalli[,1:473864]), subset.CpGs = "limma",seed = 423,savefeaturenames = TRUE, method = "SVM", calibrationmethod = "LR",cores = 20)
+
+#Balanced with SMOTE after stratified sampling
+
+SVM_BSC<-maintrain(y.. = balanced_stracavalli$histo, betas.. = as.data.frame(balanced_stracavalli[,1:473864]), subset.CpGs = "limma",seed = 412,savefeaturenames = TRUE, method = "SVM",calibrationmethod = "LR",cores = 20)
+
+
+###Testing the models
+
+##On Cavalli test split
+
+#RF
+
+RF_cavalli_pred<-mainpredict(test_cavalli,mod = RF_cavalli$mod,calibratemod = RF_cavalli$platt.calfits,y = test_cavalli$histo )
+
+RF_BC_pred<-mainpredict(test_cavalli,mod = RF_BC$mod,calibratemod = RF_BC$platt.calfits,y = test_cavalli$histo )
+
+RF_BSC_pred<-mainpredict(test_cavalli,mod = RF_BSC$mod,calibratemod = RF_BSC$platt.calfits ,y = test_cavalli$histo )
+
+
+#SVM
+
+SVM_cavalli_pred<-mainpredict(test_cavalli,mod = SVM_cavalli$mod,calibratemod = SVM_cavalli$platt.calfits,y = test_cavalli$histo )
+
+SVM_BC_pred<-mainpredict(test_cavalli,mod = SVM_BC$mod,calibratemod = SVM_BC$platt.calfits,y = test_cavalli$histo )
+
+SVM_BSC_pred<-mainpredict(test_cavalli,mod = SVM_BSC$mod,calibratemod = SVM_BSC$platt.calfits,y = test_cavalli$histo) 
+
+
+##On NMB
+
+#RF
+
+RF_cavalli_pred_NMB<-mainpredict(NMB,mod = RF_cavalli$mod,calibratemod = RF_cavalli$platt.calfits,y = NMB$histo)
+
+RF_BC_pred_NMB<-mainpredict(NMB,mod = RF_BC$mod,calibratemod = RF_BC$platt.calfits ,y = NMB$histo )
+
+RF_BSC_pred_NMB<-mainpredict(NMB,mod = RF_BSC$mod,calibratemod =  RF_BSC$platt.calfits,y = NMB$histo) 
+
+
+#SVM
+
+SVM_cavalli_pred_NMB<-mainpredict(NMB,mod = SVM_cavalli$mod,calibratemod = SVM_cavalli$platt.calfits,y = NMB$histo )
+
+SVM_BC_pred_NMB<-mainpredict(NMB,mod = SVM_BC$mod,calibratemod = SVM_BC$platt.calfits,y = NMB$histo )
+
+SVM_BSC_pred_NMB<-mainpredict(NMB,mod = SVM_BSC$mod,calibratemod = SVM_BSC$platt.calfits,y = NMB$histo )
+
+
+
+##Models trained with NMB
+
+#Balancing with SMOTE- before stratified sampling
+
+
+#balanced_NMB<-balancesampling(dat=NMB,labels=NMB$histo,topfeaturenumber = NULL,
+                                  #cutoff=200, 
+                                  #downsampling=TRUE,
+                                  #sampleseed=42,
+                                  #adjustbetas=TRUE) 
+
+#UBL Package
+
+target_samples<-max(table(NMB$histo)) 
+
+class_perc<-sapply(table(NMB$histo), function(x) { if(x == target_samples){ return(1)
+
+}else{return(target_samples/x)}})
+
+class_perc
+
+balanced_NMB<-SmoteClassif(histo~.,NMB, C.perc = as.list(class_perc))
+
+
+#Balancing with SMOTE- after stratified sampling
+
+#balanced_straNMB<-balancesampling(dat=stratified_NMB,labels=stratified_NMB$histo,topfeaturenumber = NULL, 
+                                      #cutoff=200, 
+                                      #downsampling=TRUE,
+                                      #sampleseed=42,
+                                      #adjustbetas=TRUE) 
+
+
+#SMOTE after stratified sampling 
+
+target_samples<-max(table(stratified_NMB$histo))
+
+class_perc<-sapply(table(stratified_NMB$histo), function(x) { if(x == target_samples){ return(1)
+  
+}else{return(target_samples/x)}})
+
+class_perc
+
+balanced_straNMB<-SmoteClassif(histo~.,stratified_NMB, C.perc = as.list(class_perc)) 
+
+
+
+####MethylClass Models
+
+###To check and compare performance of algorithms
+
+
+##Prior to balancing 
+
+#RF
+#maincv(y.. = NMB$histo,betas..= NMB,n.cv.folds = 5,normalcv = TRUE,out.path = "NMB_RFCV",out.fname = "NMB_RFFold",method="RF",seed = 12)
+
+#NMB_RFres<-maincalibration(y.. = NMB$histo,load.path = "NMB_RFCV",load.fname = "NMB_RFFold",normalcv = TRUE,algorithm = "RF",setseed = 12)
+
+#write.csv(NMB_RFres,paste0("NMB_RFres.csv"))
+
+#SVM
+#maincv(y.. = NMB$histo,betas..= NMB,n.cv.folds = 5,normalcv = TRUE,out.path = "NMB_SVMCV",out.fname = "NMB_SVMFold",method="SVM",seed = 12)
+
+#NMB_SVMres<-maincalibration(y.. = NMB$histo,load.path = "NMB_SVMCV",load.fname = "NMB_SVMFold",normalcv = TRUE,algorithm = "SVM",setseed = 12)
+
+#write.csv(NMB_SVMres,paste0("NMB_SVMres.csv")) 
+
+
+##After balancing with SMOTE
+
+#RF
+
+#maincv(y.. = balanced_NMB$histo,betas..= balanced_NMB,n.cv.folds = 5,normalcv = TRUE,out.path = "NB_RFCV",out.fname = "NB_CVFold",method="RF",seed = 12)
+
+#NB_RFres<-maincalibration(y.. = balanced_NMB$histo,load.path = "NB_RFCV",load.fname = "NB_CVFold",normalcv = TRUE,algorithm = "RF",setseed = 12)
+
+#write.csv(NB_RFres,paste0("NB_Rfres.csv"))  
+
+#SVM
+
+#maincv(y.. = balanced_NMB$histo,betas..= balanced_NMB,n.cv.folds = 5,normalcv = TRUE,out.path = "NB_SVMCV",out.fname = "NB_SVMFold",method="SVM",seed = 12)
+
+#NB_SVMres<-maincalibration(y.. = balanced_cavalli$histo,load.path = "NB_SVMCV",load.fname = "NB_SVMFold",normalcv = TRUE,algorithm = "SVM",setseed = 12)
+
+#write.csv(NB_SVMres,paste0("NB_SVMres.csv")) 
+
+
+##After balancing with SMOTE- Stratified Sampling 
+
+#maincv(y.. = balanced_straNMB$histo,betas..= balanced_straNMB,n.cv.folds = 5,normalcv = TRUE,out.path = "BSN_RFCV",out.fname = "BSN_CVFold",method="RF",seed = 12)
+
+#BSN_RFres<-maincalibration(y.. = balanced_straNMB$histo,load.path = "BSN_RFCV",load.fname = "BSN_CVFold",normalcv = TRUE,algorithm = "RF",setseed = 12)
+
+#write.csv(BSN_RFres,paste0("BSN_Rfres.csv")) 
+
+#SVM
+
+#maincv(y.. = balanced_straNMB$histo,betas..= balanced_straNMB,n.cv.folds = 5,normalcv = TRUE,out.path = "BSN_SVMCV",out.fname = "BSN_SVMFold",method="SVM",seed = 12)
+
+#BSN_SVMres<-maincalibration(y.. = balanced_straNMB$histo,load.path = "BSN_SVMCV",load.fname = "BSN_SVMFold",normalcv = TRUE,algorithm = "SVM",setseed = 12)
+
+#write.csv(BSN_SVMres,paste0("BSN_SVMres.csv")) 
+
+
+###Training the model
+
+##Before balancing 
+
+#RF
+
+RF_NMB<-maintrain(y.. = NMB$histo, betas.. = as.data.frame(NMB[,1:473864]), subset.CpGs = "limma",seed = 42,savefeaturenames = TRUE, method = "RF",calibrationmethod = "LR",cores = 20)
+
+saveRDS(RF_NMB,(paste0("~/HistoModels/RF_NMB.rds")))
+
+RF_BN<-maintrain(y.. = balanced_NMB$histo, betas.. = as.data.frame(balanced_NMB[,1:473864]), subset.CpGs = "limma",seed = 42,savefeaturenames = TRUE, method = "RF",calibrationmethod = "LR",cores = 20)
+
+saveRDS(RF_BN,(paste0("~/HistoModels/RF_BN.rds")))
+
+RF_BSN<-maintrain(y.. = balanced_straNMB$histo, betas.. = as.data.frame(balanced_straNMB[,1:473864]), subset.CpGs = "limma",seed = 42,savefeaturenames = TRUE, method = "RF",calibrationmethod = "LR",cores = 20) 
+
+saveRDS(RF_BSN,(paste0("~/HistoModels/RF_BSN.rds")))
+
+
+#SVM
+
+SVM_NMB<-maintrain(y.. = NMB$histo, betas.. = as.data.frame (NMB[,1:473864]), subset.CpGs = "limma",seed = 42,savefeaturenames = TRUE, method = "SVM",calibrationmethod = "LR",cores = 20)
+
+saveRDS(SVM_NMB,(paste0("~/HistoModels/SVM_NMB.rds")))
+
+SVM_BN<-maintrain(y.. = balanced_NMB$histo, betas.. = as.data.frame(balanced_NMB [,1:473864]), subset.CpGs = "limma",seed = 42,savefeaturenames = TRUE, method = "SVM",calibrationmethod = "LR",cores = 20)
+
+saveRDS(SVM_BN,(paste0("~/HistoModels/SVM_BN.rds")))
+
+SVM_BSN<-maintrain(y.. = balanced_straNMB$histo, betas.. = as.data.frame(balanced_straNMB [,1:473864]), subset.CpGs = "limma",seed = 42,savefeaturenames = TRUE, method = "SVM",calibrationmethod = "LR",cores = 20)
+
+saveRDS(SVM_BSN,(paste0("~/HistoModels/SVM_BSN.rds")))
+
+###Testing the models
+
+##On Cavalli test split
+
+#RF
+
+RF_NMB_pred<-mainpredict(test_NMB,mod = RF_NMB$mod,calibratemod = RF_NMB$platt.calfits,y = test_NMB$histo )
+
+RF_BN_pred<-mainpredict(test_NMB,mod = RF_BN$mod,calibratemod = RF_BN$platt.calfits,y = test_NMB$histo )
+
+RF_BSN_pred<-mainpredict(test_NMB,mod = RF_BSN$mod,calibratemod = RF_BSN$platt.calfits,y = test_NMB$histo) 
+
+
+#SVM
+
+SVM_NMB_pred<-mainpredict(test_NMB,mod = SVM_NMB$mod,calibratemod = SVM_NMB$platt.calfits,y = test_NMB$histo )
+
+saveRDS(SVM_NMB_pred,(paste0("~/HistoModels/SVM_NMB_pred.rds"))) 
+
+SVM_BN_pred<-mainpredict(test_NMB,mod = SVM_BN$mod,calibratemod = SVM_BN$platt.calfits,y = test_NMB$histo )
+
+saveRDS(SVM_BN_pred,(paste0("~/HistoModels/SVM_BN_pred.rds"))) 
+
+SVM_BSN_pred<-mainpredict(test_NMB,mod = SVM_BSN$mod,calibratemod = SVM_BSN$platt.calfits ,y = test_NMB$histo )
+
+saveRDS(SVM_BSN_pred,(paste0("~/HistoModels/SVM_BSN_pred.rds"))) 
+
+
+##On cavalli
+
+#RF
+
+RF_NMB_pred_cavalli<-mainpredict(cavalli,mod = RF_NMB$mod,calibratemod = RF_NMB$platt.calfits,y = cavalli$histo )
+
+saveRDS(RF_NMB_pred_cavalli,(paste0("~/HistoModels/RF_NMB_pred_cavalli.rds"))) 
+
+RF_BN_pred_cavalli<-mainpredict(cavalli,mod = RF_BN$mod,calibratemod = RF_BN$platt.calfits,y = cavalli$histo )
+
+saveRDS(RF_BN_pred_cavalli,(paste0("~/HistoModels/RF_BN_pred_cavalli.rds"))) 
+
+RF_BSN_pred_cavalli<-mainpredict(cavalli,mod = RF_BSN$mod,calibratemod = RF_BSN$platt.calfits,y = cavalli$histo )
+
+saveRDS(RF_BSN_pred_cavalli,(paste0("~/HistoModels/RF_BSN_pred_cavalli.rds")))
+
+#SVM
+
+SVM_NMB_pred_cavalli<-mainpredict(cavalli,mod = SVM_NMB$mod,calibratemod = SVM_NMB$platt.calfits,y = cavalli$histo )
+
+
+SVM_BN_pred_cavalli<-mainpredict(cavalli,mod = SVM_BN$mod,calibratemod = SVM_BN$platt.calfits,y = cavalli$histo )
+
+SVM_BSN_pred_cavalli<-mainpredict(cavalli,mod = SVM_BSN$mod,calibratemod = SVM_BSN$platt.calfits,y = cavalli$histo )
+
+
+###Caret Models
+
+##Cavalli
+
+#SMOTE
+
+target_samples<-max(table(cavalli$histo))
+
+class_perc<-sapply(table(cavalli$histo), function(x) { if(x == target_samples){ return(1)
+
+}else{return(target_samples/x)}})
+
+class_perc
+
+SMOTE_cavalli<-SmoteClassif(histo~.,cavalli, C.perc = as.list(class_perc))
+
+#SMOTE after stratified sampling 
+
+target_samples<-max(table(stratified_cavalli$histo))
+
+class_perc<-sapply(table(stratified_cavalli$histo), function(x) { if(x == target_samples){ return(1)
+  
+}else{return(target_samples/x)}})
+
+class_perc
+
+SMOTE_stracavalli<-SmoteClassif(histo~.,stratified_cavalli, C.perc = as.list(class_perc))
+
+
+##Training Models
+
+#Before Balancing 
+
+set.seed(1234) 
+
+cv <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = multiClassSummary,
+  verboseIter = TRUE,
+  savePredictions = "final",allowParallel = TRUE
+)
+
+set.seed(123)
+
+trainIndex_cavalli<- createDataPartition(cavalli$histo, p = 0.8, list = FALSE, times = 1)
+trainData_cavalli <- cavalli[trainIndex_cavalli, ]
+testData_cavalli<- cavalli[-trainIndex_cavalli, ]
+
+#RF
+mtry = sqrt(ncol(cavalli))   
+tunegrid <- expand.grid(.mtry=mtry)
+
+rf_model_cavalli<- train(histo~.,
+                   data = trainData_cavalli,
+                   method = "rf",
+                   metric = "logLoss",
+                   trControl = cv,
+                   tuneGrid = tunegrid,
+)
+
+#SVM
+
+svm_grid <- expand.grid(
+  C = 2^(-5:2),
+  sigma = 2^(-10:1)
+)
+
+svm_model_cavalli <- train(histo~.,
+                    data = trainData_cavalli,
+                    method = "svmRadial",
+                    metric = "logLoss",
+                    trControl = cv,
+                    tuneGrid = svm_grid,
+)
+
+#After SMOTE
+
+
+set.seed(42)
+
+trainIndex_BC<- createDataPartition(SMOTE_cavalli$histo, p = 0.8, list = FALSE, times = 1)
+trainData_BC <- SMOTE_cavalli[trainIndex_BC, ]
+testData_BC<- SMOTE_cavalli[-trainIndex_BC, ] 
+
+#RF
+mtry = sqrt(ncol(SMOTE_cavalli))   
+tunegrid <- expand.grid(.mtry=mtry)
+
+rf_model_BC<- train(histo~.,
+                         data = trainData_BC, 
+                         method = "rf",
+                         metric = "logLoss",
+                         trControl = cv,
+                         tuneGrid = tunegrid,
+) 
+
+#SVM
+
+svm_grid <- expand.grid(
+  C = 2^(-5:2),
+  sigma = 2^(-10:1)
+)
+
+svm_model_BC <- train(histo~.,
+                           data = trainData_BC,
+                           method = "svmRadial",
+                           metric = "logLoss",
+                           trControl = cv,
+                           tuneGrid = svm_grid,
+)
+
+
+#SMOTE after stratified sampling 
+
+set.seed(04) 
+
+trainIndex_BSC<- createDataPartition(SMOTE_stracavalli$histo, p = 0.8, list = FALSE, times = 1)
+trainData_BSC <- SMOTE_stracavalli[trainIndex_BSC, ]
+testData_BSC<- SMOTE_stracavalli[-trainIndex_BSC, ] 
+
+#RF
+mtry = sqrt(ncol(SMOTE_stracavalli))   
+tunegrid <- expand.grid(.mtry=mtry)
+
+rf_model_BSC<- train(histo~.,
+                    data = trainData_BSC,
+                    method = "rf",
+                    metric = "logLoss",
+                    trControl = cv,
+                    tuneGrid = tunegrid,
+) 
+
+#SVM
+
+svm_grid <- expand.grid(
+  C = 2^(-5:2),
+  sigma = 2^(-10:1)
+)
+
+svm_model_BSC <- train(histo~.,
+                      data = trainData_BSC,
+                      method = "svmRadial",
+                      metric = "logLoss",
+                      trControl = cv,
+                      tuneGrid = svm_grid,
+)
+
+
+###Testing models
+
+##Trained on unbalanced data 
+
+#Test split
+rf_cavalli_pred <- predict(rf_model_cavalli, newdata = testData_cavalli)
+rf_cavalli_CM <- confusionMatrix(rf_cavalli_pred, testData_cavalli$histo)
+print(rf_cavalli_CM)
+
+
+#Stratified test split
+rf_cavalli_pred_test <- predict(rf_model_cavalli, newdata = test_cavalli) 
+rf_cavalli_test_CM <- confusionMatrix(rf_cavalli_pred_test, test_cavalli$histo)
+print(rf_cavalli_test_CM)
+
+#NMB
+
+rf_cavalli_pred_NMB <- predict(rf_model_cavalli, newdata = NMB)  
+rf_cavalli_NMB_CM <- confusionMatrix(rf_cavalli_pred_NMB, NMB$histo)
+print(rf_cavalli_NMB_CM)
+
+
+##Trained on data balanced with SMOTE
+
+rf_BC_pred <- predict(rf_model_BC, newdata = testData_BC)
+rf_BC_CM <- confusionMatrix(rf_BC_pred, testData_BC$histo)
+print(rf_BC_CM)
+
+
+#Stratified test split
+rf_BC_pred_test <- predict(rf_model_BC, newdata = test_cavalli) 
+rf_BC_test_CM <- confusionMatrix(rf_BC_pred_test, test_cavalli$histo)
+print(rf_BC_test_CM)
+
+#NMB
+
+rf_BC_pred_NMB <- predict(rf_model_BC, newdata = NMB)  
+rf_BC_NMB_CM <- confusionMatrix(rf_BC_pred_NMB, NMB$histo)
+print(rf_BC_NMB_CM) 
+
+##Trained on SMOTE after stratified sampling
+
+rf_BSC_pred <- predict(rf_model_BSC, newdata = testData_BSC)
+rf_BSC_CM <- confusionMatrix(rf_BSC_pred, testData_BSC$histo)
+print(rf_BSC_CM)
+
+
+#Stratified test split
+rf_BSC_pred_test <- predict(rf_model_BSC, newdata = test_cavalli) 
+rf_BSC_test_CM <- confusionMatrix(rf_BSC_pred_test, test_cavalli$histo)
+print(rf_BSC_test_CM)
+
+#NMB
+
+rf_BSC_pred_NMB <- predict(rf_model_BSC, newdata = NMB)  
+rf_BSC_NMB_CM <- confusionMatrix(rf_BSC_pred_NMB, NMB$histo)
+print(rf_BSC_NMB_CM) 
+
+
+####NMB
+
+#SMOTE
+
+target_samples<-max(table(NMB$histo))
+
+class_perc<-sapply(table(NMB$histo), function(x) { if(x == target_samples){ return(1)
+  
+}else{return(target_samples/x)}})
+
+class_perc
+
+SMOTE_NMB<-SmoteClassif(histo~.,NMB, C.perc = as.list(class_perc))
+
+#SMOTE after stratified sampling 
+
+target_samples<-max(table(stratified_NMB$histo))
+
+class_perc<-sapply(table(stratified_NMB$histo), function(x) { if(x == target_samples){ return(1)
+  
+}else{return(target_samples/x)}})
+
+class_perc
+
+SMOTE_straNMB<-SmoteClassif(histo~.,stratified_NMB, C.perc = as.list(class_perc)) 
+
+
+##Training Models
+
+
+#Before Balancing 
+
+set.seed(1234) 
+
+cv <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = multiClassSummary,
+  verboseIter = TRUE,
+  savePredictions = "final",allowParallel = TRUE
+)
+
+set.seed(123)
+
+trainIndex_NMB<- createDataPartition(NMB$histo, p = 0.8, list = FALSE, times = 1)
+trainData_NMB <- NMB[trainIndex_NMB, ]
+testData_NMB<- NMB[-trainIndex_NMB, ]
+
+#RF
+mtry = sqrt(ncol(NMB))   
+tunegrid <- expand.grid(.mtry=mtry)
+
+
+
+rf_model_NMB<- train(histo~.,
+                         data = trainData_NMB,
+                         method = "rf",
+                         metric = "logLoss",
+                         trControl = cv,
+                         tuneGrid = tunegrid, allowParallel=TRUE
+)
+
+#SVM 
+
+svm_grid <- expand.grid(
+  C = 2^(-5:2),
+  sigma = 2^(-10:1)
+)
+
+
+
+
+svm_model_NMB <- train(histo~.,
+                           data = trainData_NMB,
+                           method = "svmRadial",
+                           metric = "logLoss",
+                           trControl = cv,
+                           tuneGrid = svm_grid,
+                           allowParallel=TRUE
+)
+
+#After SMOTE
+
+
+set.seed(42)
+
+trainIndex_BN<- createDataPartition(SMOTE_NMB$histo, p = 0.8, list = FALSE, times = 1)
+trainData_BN <- SMOTE_NMB[trainIndex_BN, ]
+testData_BN<- SMOTE_NMB[-trainIndex_BN, ] 
+
+#RF
+mtry = sqrt(ncol(SMOTE_NMB))   
+tunegrid <- expand.grid(.mtry=mtry)
+
+
+rf_model_BN<- train(histo~.,
+                    data = trainData_BN,
+                    method = "rf",
+                    metric = "logLoss",
+                    trControl = cv,
+                    tuneGrid = tunegrid,
+                    allowParallel=TRUE
+) 
+
+#SVM
+
+svm_grid <- expand.grid(
+  C = 2^(-5:2),
+  sigma = 2^(-10:1)
+)
+
+
+
+
+svm_model_BN <- train(histo~.,
+                      data = trainData_BN,
+                      method = "svmRadial",
+                      metric = "logLoss",
+                      trControl = cv,
+                      tuneGrid = svm_grid,
+                      allowParallel=TRUE
+)
+
+
+#SMOTE after stratified sampling 
+
+set.seed(04) 
+
+trainIndex_BSN<- createDataPartition(SMOTE_straNMB$histo, p = 0.8, list = FALSE, times = 1)
+trainData_BSN <- SMOTE_straNMB[trainIndex_BSN, ]
+testData_BSN<- SMOTE_straNMB[-trainIndex_BSN, ] 
+
+#RF
+mtry = sqrt(ncol(SMOTE_straNMB))   
+tunegrid <- expand.grid(.mtry=mtry)
+
+
+
+rf_model_BSN<- train(histo~.,
+                     data = trainData_BSN,
+                     method = "rf",
+                     metric = "logLoss",
+                     trControl = cv,
+                     tuneGrid = tunegrid,
+                     allowParallel=TRUE
+) 
+
+#SVM
+
+svm_grid <- expand.grid(
+  C = 2^(-5:2),
+  sigma = 2^(-10:1))
+
+
+svm_model_BSN <- train(histo~.,
+                       data = trainData_BSN,
+                       method = "svmRadial",
+                       metric = "logLoss",
+                       trControl = cv,
+                       tuneGrid = svm_grid,
+                       allowParallel=TRUE
+)
+
+
+###Testing models
+
+##Trained on unbalanced data 
+
+#Test split
+rf_NMB_pred <- predict(rf_model_NMB, newdata = testData_NMB)
+rf_NMB_CM <- confusionMatrix(rf_NMB_pred, testData_NMB$histo)
+print(rf_NMB_CM)
+
+
+#Stratified test split
+rf_NMB_pred_test <- predict(rf_model_NMB, newdata = test_NMB) 
+rf_NMB_test_CM <- confusionMatrix(rf_NMB_pred_test, test_NMB$histo)
+print(rf_NMB_test_CM)
+
+#Cavalli
+
+rf_NMB_pred_Cavalli <- predict(rf_model_NMB, newdata = cavalli)  
+rf_NMB_Cavalli_CM <- confusionMatrix(rf_NMB_pred_Cavalli,cavalli$histo)
+print(rf_NMB_Cavalli_CM) 
+
+
+##Trained on data balanced with SMOTE
+
+rf_BN_pred <- predict(rf_model_BN, newdata = testData_BN)
+rf_BN_CM <- confusionMatrix(rf_BN_pred, testData_BN$histo)
+print(rf_BN_CM)
+
+
+#Stratified test split
+rf_BN_pred_test <- predict(rf_model_BN, newdata = test_NMB) 
+rf_BN_test_CM <- confusionMatrix(rf_BN_pred_test, test_NMB$histo)
+print(rf_BN_test_CM)
+
+#Cavalli
+
+rf_BN_pred_cavalli <- predict(rf_model_BN, newdata = cavalli)  
+rf_BN_cavalli_CM <- confusionMatrix(rf_BN_pred_cavalli, cavalli$histo)
+print(rf_BN_cavalli_CM) 
+
+
+##Trained on SMOTE after stratified sampling
+
+rf_BSN_pred <- predict(rf_model_BSN, newdata = testData_BSN)
+rf_BSN_CM <- confusionMatrix(rf_BSN_pred, testData_BSN$histo)
+print(rf_BSN_CM)
+
+
+#Stratified test split
+rf_BSN_pred_test <- predict(rf_model_BSN, newdata = test_NMB) 
+rf_BSN_test_CM <- confusionMatrix(rf_BSN_pred_test, test_NMB$histo)
+print(rf_BSN_test_CM) 
+
+#Cavalli
+
+rf_BSN_pred_cavalli <- predict(rf_model_BSN, newdata = cavalli)  
+rf_BSN_cavalli_CM <- confusionMatrix(rf_BSN_pred_cavalli, cavalli$histo)
+print(rf_BSN_cavalli_CM) 
+
+stopCluster(cl) 
+registerDoSEQ() 
