@@ -1,5 +1,5 @@
 
-********THE CODE IS IN PROGRESS : is being complied into ready-to-run workflow scripts (alongside thesis write-up)*********
+********THE CODE IS IN PROGRESS : is being complied into ready-to-run workflow scripts (alongside thesis write-up)********
 
 Machine Learning (ML) and Deep Learning (DL) models for Histopathology and Molecular Biomarker prediction in Medulloblastoma (MB).
 
