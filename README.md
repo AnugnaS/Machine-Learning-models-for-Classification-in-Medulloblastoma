@@ -13,7 +13,7 @@ Main Objectives:
 9. Attention-based Multiple Instance Learning (ABMIL) with LOOCV (Leave One out Cross Validation), with the TRIDENT toolkit to extract high-attention patches. 
 
 
-******** The code is being complied into ready-to-run workflow scripts (alongside thesis write-up) ******************
+******** THE CODE IS IN PROGRESS, is being complied into ready-to-run workflow scripts (alongside thesis write-up) *********
 
 The R scripts include:
   
