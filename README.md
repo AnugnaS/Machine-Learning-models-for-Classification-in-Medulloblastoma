@@ -1,5 +1,5 @@
 
-********THE CODE IS IN PROGRESS, is being complied into ready-to-run workflow scripts (alongside thesis write-up)*********
+********THE CODE IS IN PROGRESS : is being complied into ready-to-run workflow scripts (alongside thesis write-up)*********
 
 Machine Learning (ML) and Deep Learning (DL) models for Histopathology and Molecular Biomarker prediction in Medulloblastoma (MB).
 
@@ -17,7 +17,7 @@ Main Objectives:
 
 
 
-The R scripts include:
+The R scripts (would) include:
   
 - Training an ML model with  either caret (Kuhn,2008) and/or methylClass (Liu, 2024) R package functionalities.
 - Wrapper functions for the following:
@@ -27,7 +27,7 @@ The R scripts include:
 - Application of the above described wrapper functions to test the trained ML models and visualise comparison across multiple iterations with the functionalities part of the wrapper functions. 
 
 
-The Jupyter notebooks include:
+The Jupyter notebooks (would) include:
 
 - Tissue segmentation and Patching
 - Feature Extraction followed up with UNIv2 , PCA, UMAP, PACMAP and HDBSCAN projected onto PACMAP components.
