@@ -1,3 +1,6 @@
+
+********THE CODE IS IN PROGRESS, is being complied into ready-to-run workflow scripts (alongside thesis write-up)*********
+
 Machine Learning (ML) and Deep Learning (DL) models for Histopathology and Molecular Biomarker prediction in Medulloblastoma (MB).
 
 Main Objectives:
@@ -13,7 +16,6 @@ Main Objectives:
 9. Attention-based Multiple Instance Learning (ABMIL) with LOOCV (Leave One out Cross Validation), with the TRIDENT toolkit to extract high-attention patches. 
 
 
-******** THE CODE IS IN PROGRESS, is being complied into ready-to-run workflow scripts (alongside thesis write-up) *********
 
 The R scripts include:
   
