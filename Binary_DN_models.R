@@ -62,8 +62,24 @@ wrap_title <- function(x, width = 55) {
 
 test_and_evaluate_model <- function(model, method, test_data, true_test_labels, test_data_name, model_name,
                                     train_set_name,calibrated = TRUE, calibration_method = NULL,
-                                    save_in = "~/Thesis_models/DN_models/") {
+                                    save_in = "~/Thesis_models/DN_models/") { 
+# model : model object
+
+# method: 'caret' or 'methylClass' ; "character"
   
+# test_data : test beta value matrix
+  
+# true_test_labels : Given labels before prediction, "vector"
+  
+# model_name (To set labels of plots and names of the saved files): "Random Forest", "Support Vector Machine", "XGBoost"; "character"
+  
+# train_set_name (To set labels of plots and names of the saved files) : "Train NMB" ; "character"
+  
+# calibrated (To calibrated prediction probabilities) : TRUE
+  
+# calibration_method: "LR","FLR" and/or "MR" (applicable for method = "methylClass") ; "character"
+
+ 
   dir.create(save_in, recursive = TRUE, showWarnings = FALSE)
   
   # Shortform to save files
@@ -542,6 +558,39 @@ prob_heatmaps <- function(prob_df, pred, test_pheno, sample_id_column, heatmap_l
                           true_test_labels, mol_group, sub_group, MYC_status, MYCN_status, OS, follow_up, Age,
                           continuum = "DN/bi", heatmap_panel = TRUE, correlate_plot = NULL,
                           column_for_panel = "DN", file_prefix = NULL, save_in = "~/Thesis_models/DN_models/") { 
+
+  # prob_df: probability score matrix from test_and_evaluate()$pred_probs
+  
+  # pred: prediction labels from test_and_evaluate()$pred_probs$pred
+  
+  # test_pheno : Phenotype table for test data 
+  
+  # true_test_labels : Given labels of the test data before prediction from test_pheno;"character"
+  
+  # mol_group : Principal molecular group column from test_pheno;"character"
+  
+  # sub_group : molecular sub group column from test_pheno; "character"
+  
+  # MYC_status : MYC Amplification column from test_pheno ; "character"
+  
+  # MYCN_status :  MYCN Amplification column from test_pheno ; "character"
+  
+  # OS : Overall Survival (Event : 1, No Event : 0) column from test_pheno ; "character"
+  
+  # follow_up : test_pheno column for Follow up time for Overall Survival; "character"
+  
+  # Age : Chronological Age column from test_pheno ; "character"
+  
+  # continuum : To choose which level of true_test_label would be plotted for its probability score enrichment across all the test samples ; "character"
+  
+  # heatmap_panel : TRUE if other clinical correlate should be plotted against probability scores and displayed next to probability heatmap. 
+  
+  # correlate_plot : To choose with clincal correlate plot to be saved, along with saving standalone probability score heatmap: "character"
+  
+  # column_for_panel : level of true_test_label whose probability score is to be plotted in the correlate plots; "character"
+  
+  # file_prefix : file name prefix for the outputs to be saved with; "character"
+  
   
   required_pgs <- c("ggplot2", "ComplexHeatmap", "circlize", "cowplot", "ggpubr", "survival", "dplyr", "survminer", "tibble")
   
