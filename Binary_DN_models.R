@@ -67,11 +67,11 @@ test_and_evaluate_model <- function(model, method, test_data, true_test_labels, 
 
 # method: 'caret' or 'methylClass' ; "character"
   
-# test_data : test beta value matrix
+# test_data : test data beta values ; "matrix" or "data.frame"
   
-# true_test_labels : Given labels before prediction, "vector"
+# true_test_labels : Given labels before prediction ; "vector"
   
-# model_name (To set labels of plots and names of the saved files): "Random Forest", "Support Vector Machine", "XGBoost"; "character"
+# model_name (To set labels of plots and names of the saved files): "Random Forest", "Support Vector Machine", "XGBoost" ; "character"
   
 # train_set_name (To set labels of plots and names of the saved files) : "Train NMB" ; "character"
   
@@ -559,11 +559,15 @@ prob_heatmaps <- function(prob_df, pred, test_pheno, sample_id_column, heatmap_l
                           continuum = "DN/bi", heatmap_panel = TRUE, correlate_plot = NULL,
                           column_for_panel = "DN", file_prefix = NULL, save_in = "~/Thesis_models/DN_models/") { 
 
-  # prob_df: probability score matrix from test_and_evaluate()$pred_probs
+  # prob_df: probability score matrix from test_and_evaluate()$pred_probs ; "vector"
   
-  # pred: prediction labels from test_and_evaluate()$pred_probs$pred
+  # pred: prediction labels from test_and_evaluate()$pred_probs$pred , "vector"
   
-  # test_pheno : Phenotype table for test data 
+  # test_pheno : Phenotype table for test data ; "data.frame"
+
+  # sample_id_column : Sample IDs of test data from test_pheno; "character"
+  
+  # heatmap_label : Title of the output heatmap; "character" 
   
   # true_test_labels : Given labels of the test data before prediction from test_pheno;"character"
   
