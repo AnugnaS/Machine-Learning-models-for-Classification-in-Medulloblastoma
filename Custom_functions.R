@@ -1,5 +1,6 @@
-
-# ---- Custom Functions to test the ML models and produce corresponding evaluation metrics and plots ------------------------------------------
+# =========================================================================================================================================#
+# ---- Custom Functions to test the ML models and produce corresponding evaluation metrics and plots ---------------------------------------
+# =========================================================================================================================================#
 
 # for title-wrapping to avoid the plots getting cut off over long descriptive titles.
 
@@ -607,6 +608,8 @@ prob_heatmaps <- function(prob_df,
   
   
   # ---- Annotation Labels-----------------------------------------------------------------------------
+
+  # IMPORTANT: CHANGE ACCORDINGLY
   
   test_pheno[[MYC_status]]  <- gsub("0", "Neutral", test_pheno[[MYC_status]])
   test_pheno[[MYC_status]]  <- gsub("1", "AMP", test_pheno[[MYC_status]])
