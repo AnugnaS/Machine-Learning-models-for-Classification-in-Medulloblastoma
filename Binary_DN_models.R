@@ -785,7 +785,7 @@ shh_pool <- function(age_probes = NULL,
   
   Cavalli_SHH_pheno<-Cavalli_SHH_pheno[!is.na(Cavalli_SHH_pheno$Mol_grp),]
   
-  Cavalli_SHH_pheno<-droplevels(Cavalli_SHH_pheno)  # drop unused factor levels left over from subsetting the full Cavalli cohort down to SHH-MB only
+  Cavalli_SHH_pheno<-droplevels(Cavalli_SHH_pheno)  
   
   Cavalli_SHH_betas<-Cavalli_betas[match(Cavalli_SHH_pheno$Sample_ID,rownames(Cavalli_betas)),]
   
@@ -815,7 +815,7 @@ shh_pool <- function(age_probes = NULL,
         Path_master %in% c("DN", "MBEN") ~ "DN"
       ))
   } else {
-    Inf_pheno <- Inf_pheno[match(rownames(Inf_betas), Inf_pheno$Sentrix_ID), ]   # FIX: was lowercase inf_pheno (undefined)
+    Inf_pheno <- Inf_pheno[match(rownames(Inf_betas), Inf_pheno$Sentrix_ID), ]   
     Inf_pheno <- Inf_pheno[!is.na(Inf_pheno$Sentrix_ID), ]
     Inf_betas <- Inf_betas[match(Inf_pheno$Sentrix_ID, rownames(Inf_betas)), ]
     
@@ -903,14 +903,14 @@ shh_pool <- function(age_probes = NULL,
     Train_SHH_Inf_pheno <- Train_SHH_pheno[Train_SHH_pheno$Mol_group == "SHH-Inf-MB", ]
     match_idx <- match(Train_SHH_Inf_pheno$Sample_ID, rownames(Train_SHH_mat))
     Train_SHH_Inf_pheno <- Train_SHH_Inf_pheno[!is.na(match_idx), ]
-    Train_SHH_Inf_pheno <- droplevels(Train_SHH_Inf_pheno)  # drop levels (e.g. "SHH-Old-MB") that no longer appear after subsetting to SHH-Inf-MB only
+    Train_SHH_Inf_pheno <- droplevels(Train_SHH_Inf_pheno) 
     Train_SHH_inf <- Train_SHH_mat[match_idx[!is.na(match_idx)], ]
     
     
     Cavalli_inf_pheno<-Cavalli_SHH_pheno[Cavalli_SHH_pheno$mol_grp == "SHH-Inf-MB",]
     
     Cavalli_inf_pheno<-Cavalli_inf_pheno[!is.na(Cavalli_inf_pheno$mol_grp),]
-    Cavalli_inf_pheno<-droplevels(Cavalli_inf_pheno)  # same reasoning, for the Cavalli-side subset
+    Cavalli_inf_pheno<-droplevels(Cavalli_inf_pheno)  
     
     Cavalli_inf_betas<-Cavalli_SHH_betas[match(Cavalli_inf_pheno$Sample_ID, rownames(Cavalli_SHH_betas)),]
     
@@ -1612,7 +1612,6 @@ plot_accel_vs_age(
 
 SHH_inf_sets <- shh_pool(age_probes = age_probes, infant = TRUE)
 
-# shh_pool(infant=TRUE) returns fields named Train_inf_betas/Train_inf_pheno
 
 Train_SHH_inf_betas<-SHH_inf_sets$Train_inf_betas
 
@@ -2003,7 +2002,7 @@ fit_and_score <- function(cfg, x_train, y_train, x_test, seed) {
 #
 # Returns
 #   n_info  : for each design, the mean number of training samples (total and per stratum) actually used
-#   p_array : P(DN) for [test sample x design x repeat]  (NA where a fit failed)
+#   p_array : P(DN) for [test sample x design x repeat]  
 #   is_dn   : TRUE for the DN test samples
 
 run_experiment <- function(cfg, designs, strata, test_on = c("cv", "cavalli"), n_reps, seed0, label) {
@@ -2439,7 +2438,7 @@ run_projection <- function(cfg_name, cfg) {
     result$curve2_coefficients <- all_coefs
   }
   
-  saveRDS(result, file.path(out_dir, "projection_result.rds"))   # output for re-plotting; never read back by this script
+  saveRDS(result, file.path(out_dir, "projection_result.rds"))   
   result
 }
 
