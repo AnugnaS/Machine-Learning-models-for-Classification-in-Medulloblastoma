@@ -46,7 +46,7 @@ devtools::load_all("~/methylClass-fork")
 
 # ------ Load Custom Functions defined in "Custom_functions.R to test,evaluate and produce plots and heatmaps for the models being tested ------ #
 
-source("Custom_functions.R", echo = TRUE) 
+source("~/R/Custom_functions.R", echo = TRUE) 
 
 # IMPORTANT: Change Train set and Test set names, and labels/titles accordingly
 
