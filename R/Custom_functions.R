@@ -5,6 +5,8 @@
 
 if (!requireNamespace("stringr", quietly = TRUE)) install.packages("stringr")
 
+library(stringr)
+
 wrap_title <- function(x, width = 55) { str_wrap(x, width = width)} 
 
 
@@ -104,9 +106,9 @@ test_and_evaluate <- function(model,
   
   if (is.null(method)) method <- detect_engine(model)
   
-  model_labels <- if (method == "caret") model$levels else levels(as.factor(model$mod[[1]]$classes))
+  model_labels <- if (method == "caret") model$levels else levels(as.factor(colnames(model$rawscores)))
   
-  if (!setequal(model_labels, classes)) {
+  if (!setequal(model_labels, classes)) { 
     stop("The histology levels of the model (", paste(model_labels, collapse = ", "),
          ") and the test data (", paste(classes, collapse = ", "), ") DO NOT match")
   }
@@ -114,37 +116,99 @@ test_and_evaluate <- function(model,
   # ---- Predictions ------------------------------------------------------------------------------
   
   if (method == "caret") {
+    
+    if (calibrated){ 
+      
+      test_probs  <- tryCatch(predict(model, newdata = test_data, type = "prob"),
+                          error = function(e) stop("predict(prob) failed: ", conditionMessage(e)))
+      
+      
+      calibrate_glmnet <- function(train_probs, y_train, test_probs,
+                                   family = calibration_method,
+                                   alpha = 0, nfolds = 10) {
+        family <- match.arg(family)
+        
+        train_probs<- model$pred
+        
+        train_probs <- train_probs[order(train_probs$rowIndex), ] 
+        
+        y_train <- train_probs$obs
+        
+        train_probs <- as.matrix(train_probs[, levels(y_train)])
+        
+        cl   <- colnames(train_probs)
+        
+        y_tr <- factor(y_train, levels = cl)
+        
+        if (family == "MR") {
+          
+          fit <- glmnet::cv.glmnet(train_probs, y_tr, family = "multinomial",
+                                   alpha = alpha, type.measure = "deviance",
+                                   nfolds = nfolds)
+          
+          pred_probs <- predict(fit, test_probs, s = "lambda.min", type = "response")[, , 1]
+          
+          pred_labels <- as.factor(colnames(pred_probs)[apply(pred_probs, 1, which.max)])
+          
+        } else {
+          
+          out <- sapply(cl, function(k) {
+            
+            yk  <- factor(as.numeric(y_tr == k), levels = c(0, 1))
+            
+            fit <- glmnet::cv.glmnet(train_probs, yk, family = "binomial",
+                                     alpha = alpha, type.measure = "deviance",
+                                     nfolds = nfolds)
+            
+            as.vector(predict(fit, test_probs, s = "lambda.min", type = "response"))
+          })
+        }
+        
+        pred_probs <- matrix(out, nrow = nrow(test_probs), dimnames = list(rownames(test_probs), cl))
+        
+        pred_probs / rowSums(out) 
+        
+        pred_labels <- as.factor(colnames(pred_probs)[apply(pred_probs, 1, which.max)])
+        
+      }
+    
+      
+    } else {
+    
     pred_labels <- tryCatch(predict(model, newdata = test_data),
                             error = function(e) stop("predict() failed: ", conditionMessage(e)))
     pred_probs  <- tryCatch(predict(model, newdata = test_data, type = "prob"),
                             error = function(e) stop("predict(prob) failed: ", conditionMessage(e)))
-    pred_probs  <- as.data.frame(pred_probs)
+    pred_probs  <- as.data.frame(pred_probs) 
     
-  } else if (calibrated) {
-    calfit <- switch(as.character(calibration_method),
-                     MR  = model$glmnet.calfit,
-                     LR  = model$platt.calfits,
-                     FLR = model$platt.brglm.calfits,
-                     stop("calibration_method must be one of 'MR', 'LR' or 'FLR' when calibrated = TRUE"))
-    
-    if (is.null(calfit)) stop("This model has no '", calibration_method,
-                              "' calibration fit (was calibrationmethod passed to maintrain()?)")
-    pred <- tryCatch(methylClass::mainpredict(newdat = test_data, mod = model$mod, calibratemod = calfit),
-                     error = function(e) stop("methylClass::predict error: ", conditionMessage(e)))
-    
-    pred_probs  <- as.data.frame(pred$probs)
-    
-    pred_labels <- as.factor(pred$pres)
-    
+    }
+  
   } else {
+    
+    if (calibrated){ 
+      
+      calfit <- switch(as.character(calibration_method),
+                       MR  = model$glmnet.calfit,
+                       LR  = model$platt.calfits,
+                       FLR = model$platt.brglm.calfits,
+                       stop("calibration_method must be one of 'MR', 'LR' or 'FLR' when calibrated = TRUE"))
+      
+      
+      pred <- tryCatch(methylClass::mainpredict(newdat = test_data, mod = model$mod, calibratemod = calfit),
+                       error = function(e) stop("methylClass::predict error: ", conditionMessage(e)))
+      pred_labels <- as.factor(pred$pres,levels = classes)
+      pred_probs  <- as.data.frame(pred$scores)
+      
+      } else { 
+      
     pred <- tryCatch(methylClass::mainpredict(newdat = test_data, mod = model$mod),
                      error = function(e) stop("methylClass::predict error: ", conditionMessage(e)))
-    pred_labels <- as.factor(pred$rawpres)
+    pred_labels <- as.factor(pred$rawpres,levels = classes)
     pred_probs  <- as.data.frame(pred$scores)
   }
+}
   
-  
-  pred_labels <- factor(pred_labels, levels = classes)
+
   
   # ---- Confusion matrix + plot ---------------------------------------------------------------------
   
@@ -453,6 +517,7 @@ prob_heatmaps <- function(prob_df,
                           follow_up, 
                           Age,
                           continuum = "NULL", 
+                          binary = FALSE,
                           heatmap_panel = TRUE, 
                           correlate_plot = NULL,
                           column_for_panel = "DN", 
@@ -499,7 +564,7 @@ prob_heatmaps <- function(prob_df,
   
   # ---- Packages -----------------------------------------------------------------------------
   
-  required_pgs <- c("ggplot2", "ComplexHeatmap", "circlize", "cowplot", "ggpubr", "survival", "dplyr", "survminer", "tibble")
+  required_pgs <- c("ggplot2", "ComplexHeatmap", "circlize", "cowplot", "ggpubr", "stringr","survival", "dplyr", "survminer", "tibble")
   
   bioc_pgs <- c("ComplexHeatmap")
   
@@ -589,11 +654,11 @@ prob_heatmaps <- function(prob_df,
   
   if(binary){
     
-    prob_df$Class <- classify_outcome(prob_df$bi_histo, prob_df$pred, binary = binary)
+    prob_df$Class <- classify_outcome(prob_df$bi_histo, prob_df$pred)
     
   } else {
     
-    prob_df$Class <- classify_outcome(prob_df$True_label, prob_df$pred, binary = binary) } 
+    prob_df$Class <- classify_outcome(prob_df$True_label, prob_df$pred) }  
   
   
   prob_cols   <- if (binary) c("DN", "non_DN") else intersect(c("CLA", "DN", "LCA", "MBEN"), colnames(prob_df))
@@ -660,7 +725,10 @@ prob_heatmaps <- function(prob_df,
                                levels = intersect(names(CLASS_COLOURS), 
                                                   unique(prob_df$Class)))
   
-  if (binary) {class_display <- gsub("non_DN", "nonDN", as.character(prob_df$Class))}
+  if (binary) {class_display <- gsub("non_DN", "nonDN", as.character(prob_df$Class))} else {
+    
+    class_display<-prob_df$Class
+  } 
   
   prob_df$Age <- test_pheno[[Age]] 
   
@@ -1071,7 +1139,7 @@ prob_heatmaps <- function(prob_df,
              ". Valid options are: ", paste(available_plots, collapse = ", "), ", or \"All\".")
       }
       
-      ggsave(file.path(save_in, paste0(label_shorthand, "_heatmap.png")),
+      ggsave(file.path(save_in, paste0(file_id, "_heatmap.png")),
              ht_titled, width = 15, height = 5, dpi = 300, bg = "white")
       
       if ("Age" %in% plots_to_run) {
@@ -1098,7 +1166,7 @@ prob_heatmaps <- function(prob_df,
                 plot.title = element_text(hjust = 0.5, face = "bold")) +
           coord_cartesian(clip = "off")
         
-        ggsave(file.path(save_in, paste0(label_shorthand, "_age_scatter.png")),
+        ggsave(file.path(save_in, paste0(file_id, "_age_scatter.png")),
                p_age, width = 9, height = 6, dpi = 300, bg = "white")
         
         prob_df <- prob_df %>%
@@ -1126,7 +1194,7 @@ prob_heatmaps <- function(prob_df,
                 plot.title = element_text(hjust = 0.5, face = "bold")) +
           coord_cartesian(clip = "off")
         
-        ggsave(file.path(save_in, paste0(label_shorthand, "_age_density.png")),
+        ggsave(file.path(save_in, paste0(file_id, "_age_density.png")),
                p_age_density, width = 9, height = 6, dpi = 300, bg = "white")
       }
       
@@ -1146,7 +1214,7 @@ prob_heatmaps <- function(prob_df,
                 plot.title      = element_text(hjust = 0.5, face = "bold")) +
           coord_cartesian(clip = "off")
         
-        ggsave(file.path(save_in, paste0(label_shorthand, "_MYC_density.png")),
+        ggsave(file.path(save_in, paste0(file_id, "_MYC_density.png")),
                p_myc_density, width = 9, height = 6, dpi = 300, bg = "white")
         
         prob_df$MYCN_status <- as.factor(test_pheno[[MYCN_status]])
@@ -1164,7 +1232,7 @@ prob_heatmaps <- function(prob_df,
           coord_cartesian(clip = "off")
         
         
-        ggsave(file.path(save_in, paste0(label_shorthand, "_MYCN_density.png")),
+        ggsave(file.path(save_in, paste0(file_id, "_MYCN_density.png")),
                p_mycn_density, width = 9, height = 6, dpi = 300, bg = "white")
       }
       
@@ -1190,7 +1258,7 @@ prob_heatmaps <- function(prob_df,
                 plot.title = element_text(hjust = 0.5, face = "bold")) +
           coord_cartesian(clip = "off")
         
-        ggsave(file.path(save_in, paste0(label_shorthand, "_mol_grp_boxplot.png")),
+        ggsave(file.path(save_in, paste0(file_id, "_mol_grp_boxplot.png")),
                p_mol_group, width = 9, height = 6, dpi = 300, bg = "white")
         
         prob_df$sub_group <- as.factor(test_pheno[[sub_group]])
@@ -1213,22 +1281,22 @@ prob_heatmaps <- function(prob_df,
                 plot.title = element_text(hjust = 0.5, face = "bold")) +
           coord_cartesian(clip = "off")
         
-        ggsave(file.path(save_in, paste0(label_shorthand, "_sub_grp_boxplot.png")),
+        ggsave(file.path(save_in, paste0(file_id, "_sub_grp_boxplot.png")),
                p_subgroup, width = 9, height = 6, dpi = 300, bg = "white")
       }
       
       if ("Survival" %in% plots_to_run) {
         
         p_km_class <- build_km_plot(km_fit_class, plot_title = paste0("Survival by Class in ", cohort_name), palette = class_palette, theme_to_apply = TRUE)
-        ggsave(file.path(save_in, paste0(label_shorthand, "_KM_class.png")),
+        ggsave(file.path(save_in, paste0(file_id, "_KM_class.png")),
                p_km_class, width = 9, height = 6, dpi = 300, bg = "white")
         
         p_km_pred <- build_km_plot(km_fit_pred, plot_title = paste0("Survival by Predicted Label in ", cohort_name),palette = pred_palette, theme_to_apply = TRUE)
-        ggsave(file.path(save_in, paste0(label_shorthand, "_KM_pred.png")),
+        ggsave(file.path(save_in, paste0(file_id, "_KM_pred.png")),
                p_km_pred, width = 9, height = 6, dpi = 300, bg = "white")
         
         p_km_true <- build_km_plot(km_fit_true_label, plot_title = paste0("Survival by True Histology Label in ", cohort_name), palette = true_label_palette, theme_to_apply = TRUE)
-        ggsave(file.path(save_in, paste0(label_shorthand, "_KM_true_label.png")),
+        ggsave(file.path(save_in, paste0(file_id, "_KM_true_label.png")),
                p_km_true, width = 9, height = 6, dpi = 300, bg = "white")
       }
       
