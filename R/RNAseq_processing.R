@@ -18,9 +18,9 @@ RNA_dir<-"~/Thesis_models/RNA_dir/"
 
 dir.create(RNA_dir, showWarnings = FALSE, recursive = TRUE)
 
-required_pgs <- c("dplyr", "limma","ggplot2","multcompView","ggpubr","scales")
+required_pgs <- c("dplyr", "limma","ggplot2","multcompView","ggpubr","scales", "ggplot2","tidyr","ashr")
 
-required_bioc_pgs<-c("sva","DESeq2","edgeR","BatchQC")
+required_bioc_pgs<-c("sva","DESeq2","edgeR","BatchQC", "biomaRt","org.Hs.eg.db")
 
 missing_pgs  <- required_pgs[!sapply(required_pgs, requireNamespace, quietly = TRUE)]
 
@@ -66,6 +66,8 @@ NMB_RNA_seq$Overall.Survival.Status<-as.factor(NMB_Final_Cohort$OS)
 NMB_RNA_seq$Overall.Survival.Time<-as.numeric(NMB_Final_Cohort$`Follow up years`)
 
 NMB_RNA_seq$Age<-as.numeric(NMB_Final_Cohort$Age)
+
+NMB_RNA_seq$Sex<-as.factor(NMB_Final_Cohort$Sex)
 
 RNA_seq<-RNA_seq[!RNA_seq$Sample_ID %in% NMB_RNA_seq$Sample_ID,]
 
@@ -123,6 +125,14 @@ RNA_seq_samplesheet$MYC_Amplification_Status<-as.factor(RNA_seq_samplesheet$MYC_
 
 RNA_seq_samplesheet <- RNA_seq_samplesheet %>% mutate(MYCN_Amplification_Status = case_when( MYCN_Amplification_Status %in% c("1","AMP") ~ "1",
                                                                                              MYCN_Amplification_Status %in% c("0","wt") ~ "0",
+                                                                                             TRUE ~ NA
+                                                                                             
+))
+
+RNA_seq_samplesheet$MYCN_Amplification_Status<-as.factor(RNA_seq_samplesheet$MYCN_Amplification_Status)
+
+RNA_seq_samplesheet <- RNA_seq_samplesheet %>% mutate(Sex = case_when( Sex %in% c("m","M","m_") ~ "M",
+                                                                                            Sex %in% c("f","F") ~ "F",
                                                                                              TRUE ~ NA
                                                                                              
 ))
@@ -254,6 +264,8 @@ sampleTable$OS<-as.factor(RNA_seq_samplesheet$Overall.Survival.Status)
 
 sampleTable$Follow_up<-RNA_seq_samplesheet$Overall.Survival.Time
 
+sampleTable$Sex<-as.factor(RNA_seq_samplesheet$Sex)
+
 #sampleTable$CTNNB1 <- RNA_seq_samplesheet$CTNNB1_Status
 
 #sampleTable$ImmuneCluster <- RNA_seq_samplesheet$Consensus_Immune_Cluster
@@ -274,7 +286,7 @@ RNA_seq_combined<- DESeqDataSetFromMatrix(colData = sampleTable,
 
 saveRDS(RNA_seq_combined, file = file.path(path.expand(RNA_dir),"RNAseq_combined.rds"))
 
-#------------Removing low count genes--------------------
+#------------Removing low count and sex chr genes--------------------
 
 RNA_seq_NMB<-readRDS(file.path(path.expand(RNA_dir),"RNAseq_NMB.rds"))
 
@@ -284,26 +296,55 @@ train_RNAseq<-RNA_seq_NMB
 
 test_RNAseq<-RNA_seq_combined
 
+keep <- rowSums(counts(train_RNAseq)) > 0
+
+count_data_removed <- train_RNAseq[!keep, ]
+
+train_RNAseq       <- train_RNAseq[keep, ]
+
 shared <- intersect(rownames(train_RNAseq), rownames(test_RNAseq))
 
 train_RNAseq <- train_RNAseq[shared, ]
 
 test_RNAseq  <- test_RNAseq[shared, ]
 
-keep <- rowSums(counts(train_RNAseq)) > 0
+stopifnot(identical(rownames(train_RNAseq), rownames(test_RNAseq)))
 
-count_data_removed<-train_RNAseq[!keep,]
+length(shared)   
+
+# Removing genes on sex chromosomes 
+
+require(org.Hs.eg.db)
+
+gene_symbols <- rownames(train_RNAseq) 
+
+chr <- mapIds(org.Hs.eg.db,
+              keys      = gene_symbols,
+              column    = "CHR",
+              keytype   = "SYMBOL",
+              multiVals = "first")
+
+table(chr, useNA = "ifany")   
+
+autosomal <- !is.na(chr) & chr %in% as.character(1:22)
+
+sex_genes <- !is.na(chr) & chr %in% c("X", "Y")
+
+sex_count_data<-train_RNAseq[sex_genes,]
+
+train_RNAseq <- train_RNAseq[autosomal, ]
+
+saveRDS(train_RNAseq,file.path(path.expand(RNA_dir),"Train_RNAseq_keep_genes.rds"))
+
+count_data_removed<-rbind(count_data_removed,sex_count_data)
 
 saveRDS(count_data_removed, file.path(path.expand(RNA_dir), "NMB_count_data_removed.rds"))
 
-train_RNAseq <- train_RNAseq[keep,]
-
-test_RNAseq  <- test_RNAseq[keep,]
+test_RNAseq <- test_RNAseq[autosomal, ]
 
 saveRDS(test_RNAseq,file.path(path.expand(RNA_dir),"Test_RNAseq_keep_genes.rds"))
 
 stopifnot(all(rownames(train_RNAseq) == rownames(test_RNAseq))) 
-
 
 # --------- Normalisation and Variance Stabilizing Transformation --------------------
 
@@ -643,6 +684,20 @@ for (set in names(corrected_sets)){
   
 }
 
+# Batch-correcting non-CPR cohorts test set with ComBat-ref
+
+test_RNAseq<-readRDS(file.path(path.expand(RNA_dir),"Test_RNAseq_keep_genes.rds"))
+
+test_pheno<-as.data.frame(colData(test_RNAseq))
+
+test_counts<-counts(test_RNAseq)
+
+test_cs_ref_histo <- ComBat_ref(counts = as.matrix(test_counts), 
+                                 batch = test_pheno$Batch, 
+                                 group = test_pheno$Histology)
+
+saveRDS(test_cs_ref_histo, file.path(path.expand(RNA_dir), "Test_RNAseq_keep_genes_bc.rds"))
+
 #----Train VST (after batch correction with ComBat-ref) onto Test VST--------
 
 RNA_dir<-"~/Thesis_models/RNA_dir/"
@@ -797,308 +852,877 @@ saveRDS(train_NMB_mat_limma, file.path(path.expand(RNA_dir), "Train_RNAseq_limma
 
 # ------------------Differential Gene Expression ------------------------------------------------
 
-#-------------Load packages and data if not in the env.-----------------------------------
+#-------------Load data if not in the env.-----------------------------------
 
-require(DESeq2)
+RNA_dir<-"~/Thesis_models/RNA_dir/"
 
-RNA_seq_NMB<-readRDS(file.path(path.expand(RNA_dir),"RNAseq_NMB.rds"))
+DGE_dir<-"~/Thesis_models/RNA_dir/DGE/"
 
-#RNA_seq_combined<-readRDS(file.path(path.expand(RNA_dir),"RNAseq_combined.rds"))
+dir.create(DGE_dir, showWarnings = FALSE, recursive = TRUE)
 
-table(RNA_seq_NMB$Group, RNA_seq_NMB$Histology)
+train_RNAseq<-readRDS(file.path(path.expand(RNA_dir),"Train_RNAseq_keep_genes.rds"))
 
-NMB_pheno<-as.data.frame(colData(RNA_seq_NMB))
+test_RNAseq<-readRDS(file.path(path.expand(RNA_dir),"Test_RNAseq_keep_genes.rds"))
 
-NMB_pheno<-NMB_pheno[NMB_pheno$Group != "MBNOS",]
-
-NMB_pheno$Group<-as.factor(make.names(as.character(NMB_pheno$Group))) 
-
-# Applying CLA histology as the baseline/reference group
-
-NMB_pheno$Histology<-relevel(factor(NMB_pheno$Histology), ref = "CLA")
-
-NMB_pheno$Batch<-as.factor(NMB_pheno$Batch)
-
-NMB_pheno <- droplevels(NMB_pheno)
-
-ids <- as.character(NMB_pheno$Sample_ID)
-
-rownames(NMB_pheno) <- ids
-
-NMB_counts <- as.matrix(counts(RNA_seq_NMB))[, ids]       
-
-stopifnot(identical(colnames(NMB_counts), ids),
-          identical(colnames(NMB_counts), rownames(NMB_pheno)))
+test_RNAseq_bc<-readRDS(file.path(path.expand(RNA_dir),"Test_RNAseq_keep_genes_bc.rds"))
 
 
-design_DGE<- ~ Batch + Group + Histology  
+contrast_list <- list(
+  DN_vs_CLA  = c("Histology", "DN",  "CLA"),
+  LCA_vs_CLA = c("Histology", "LCA", "CLA"),
+  LCA_vs_DN  = c("Histology", "LCA", "DN")
+)
 
-mm<-model.matrix(design_DGE, NMB_pheno)
+status_cols <- c(Up = "firebrick", Down = "steelblue", NS = "grey75")
 
-qr(mm)$rank == ncol(mm)
+GROUP_COLS <- c("WNT-MB"    = "blue",
+                "SHH-MB"    = "red3",
+                "Group3-MB" = "yellow3",
+                "Group4-MB" = "darkgreen")
 
-dds<-DESeqDataSetFromMatrix(countData = NMB_counts, colData = NMB_pheno , design = design_DGE)
+HISTO_COLS <- c("CLA"    = "purple",
+                "LCA"    = "pink3",
+                "DN" = "darkgreen")
 
-keep <-rowSums(counts(dds) >= 10 ) >= min(table(dds$Histology)) 
+#---------Helper Functions for DGE--------------------------------
 
-dds<-dds[keep,]
-
-nrow(dds)
-
-dds<-DESeq(dds)
-
-resultsNames(dds)
-
-plotDispEsts(dds)
-
-#--------LFC Shrinkage--------
-
-contrasts<-list(DN_vs_CLA = c("Histology", "DN", "CLA"),
-                LCA_vs_CLA = c("Histology", "LCA", "CLA"),
-                LCA_vs_DN = c("Histology", "LCA", "DN"))
-
-
-raw_res<-lapply(contrasts, function(c) results(dds, contrast = c , alpha = 0.05))
-
-shrunk_res<-Map(function(c,r) 
-  lfcshrink(dds,contrast = ct , res = r,type = "ashr", quite = TRUE), contrasts, raw_res)
-
-lapply(raw_res, summary)
-
-# To check p values
-
-hist(raw_res$CLA_vs_LCA$p_value, breaks = 50)
-
-sig_hits<-function(res,padj_thres = 0.05, lfc_thres = 1){
+res_table <- function(raw, shrunk) {
+  df <- as.data.frame(raw)[, c("baseMean", "log2FoldChange", "pvalue", "padj")]
   
- sig_genes<-as.data.frame(res)
- 
- sig_genes$gene<-rownames(sig_genes)
- 
- sig_genes<-sig_genes[!is.na(sig_genes$p_adj) & sig_genes$padj < padj_thres & abs(sig_genes$log2FoldChange) > lfc_thres,]
- 
- sig_genes[order(sig_genes$padj),]
-
- }
-
-hits<-lapply(shrunk_res, sig_hits)
-
-sapply(hits, nrow)
-
-# ------------With interaction term in the design matrix - to see if histology effects could be modelled specific to each molecular group - Likelihood Ratio Test -------------
-
-# Applying interactions isnt full rank as a few Molecular groups do not carry all histology types- so dropping the zero count/less count cells
-
-int<-paste(NMB_pheno$Group, NMB_pheno$Histology , sep = "_")
-
-int_tab<-table(int)
-
-int <- int %>% names(int_table)[int_tab > 4]
-
-pheno_i<-droplevels(NMB_pheno[int,])
-
-pheno_i$int<-droplevels(as.factor(paste(pheno_i$Group, pheno_i$Histology, sep = "_")))
-
-table(pheno_i$Group,pheno_i$Histology)
-
-full_model <- ~Batch + int
-
-reduced_model <- ~Batch + Group + Histology
-
-m_full<-model.matrix(full, pheno_i)
-
-m_red<-model.matrix(reduced, pheno_i)
-
-stopifnot(qr(m_full)$rank == ncol(m_full), qr(m_red)$rank == ncol(m_red))
-
-#-----Likelihood Ratio Test--------------
-
-genes_i<-rownames(dds)
-
-dds_i<-DESeqDataSetFromMatrix(counData = NMB_counts[genes_i, pheno_i$Sample_ID],
-                              colData = pheno_i,
-                              design = full_model)
-
-dds_lrt<-DESeq(dds_i, test = "LRT", reduced = reduced_model)
-
-res_int<-results(dds_lrt)
-
-# Checking p-values
-
-hist(res_int$pvalue, breaks = 50)
-
-sum(res_int$padj < 0.1, na.rm = TRUE)
-
-res_int<-res_int[order(res_int$padj),]
-
-head(res_int$stat)
-
-
-#-------------DGE and LRT on non-CPR cohorts---------------------
-
-RNA_seq_combined<-readRDS(file.path(path.expand(RNA_dir),"RNAseq_combined.rds"))
-
-
-table(RNA_seq_combined$Group, RNA_seq_combined$Histology)
-
-test_pheno<-as.data.frame(colData(RNA_seq_combined))
-
-test_pheno<-test_pheno[test_pheno$Group != "MBNOS",]
-
-test_pheno$Group<-as.factor(make.names(as.character(test_pheno$Group))) 
-
-# Applying CLA histology as the baseline/reference group
-
-test_pheno$Histology<-relevel(factor(test_pheno$Histology), ref = "CLA")
-
-test_pheno$Batch<-as.factor(test_pheno$Batch)
-
-test_pheno <- droplevels(test_pheno)
-
-ids <- as.character(test_pheno$Sample_ID)
-
-rownames(test_pheno) <- ids
-
-test_counts <- as.matrix(counts(RNA_seq_combined))[, ids]       
-
-stopifnot(identical(colnames(test_counts), ids),
-          identical(colnames(test_counts), rownames(test_pheno)))
-
-
-design_DGE<- ~ Batch + Group + Histology  
-
-mm<-model.matrix(design_DGE, test_pheno)
-
-qr(mm)$rank == ncol(mm)
-
-dds_non_CPR<-DESeqDataSetFromMatrix(countData = test_counts, colData = test_pheno , design = design_DGE)
-
-keep <-rowSums(counts(dds_non_CPR) >= 10 ) >= min(table(dds_non_CPR$Histology)) 
-
-dds_non_CPR<-dds_non_CPR[keep,]
-
-nrow(dds_non_CPR)
-
-dds_non_CPR<-DESeq(dds_non_CPR)
-
-resultsNames(dds_non_CPR)
-
-plotDispEsts(dds_non_CPR)
-
-#--------LFC Shrinkage--------
-
-contrasts<-list(DN_vs_CLA = c("Histology", "DN", "CLA"),
-                LCA_vs_CLA = c("Histology", "LCA", "CLA"),
-                LCA_vs_DN = c("Histology", "LCA", "DN"))
-
-
-non_CPR_raw_res<-lapply(contrasts, function(c) results(dds_non_CPR, contrast = c , alpha = 0.05))
-
-non_CPR_shrunk_res<-Map(function(c,r) 
-  lfcshrink(dds_non_CPR,contrast = ct , res = r,type = "ashr", quite = TRUE), contrasts, raw_res)
-
-lapply(non_CPR_shrunk_res, summary)
-
-# To check p values
-
-hist(non_COR_shrunk_res$CLA_vs_LCA$p_value, breaks = 50)
-
-sig_hits<-function(res,padj_thres = 0.05, lfc_thres = 1){
+  names(df)[names(df) == "log2FoldChange"] <- "log2FC_raw"
   
-  sig_genes<-as.data.frame(res)
+  df$log2FC <- shrunk$log2FoldChange
   
-  sig_genes$gene<-rownames(sig_genes)
+  df$gene   <- rownames(df) 
   
-  sig_genes<-sig_genes[!is.na(sig_genes$p_adj) & sig_genes$padj < padj_thres & abs(sig_genes$log2FoldChange) > lfc_thres,]
-  
-  sig_genes[order(sig_genes$padj),]
-  
+  df
 }
 
-non_CPR_hits<-lapply(non_CPR_shrunk_res, sig_hits)
+DGE_change <- function(df, lfc_threshold, padj_cutoff) {
+  
+  df$status <- "NS"
+  
+  ok <- !is.na(df$padj) & !is.na(df$log2FC) & df$padj < padj_cutoff
+  
+  df$status[ok & df$log2FC >  lfc_threshold] <- "Up"
+  
+  df$status[ok & df$log2FC < -lfc_threshold] <- "Down"
+  
+  df$status <- factor(df$status, levels = c("Up", "Down", "NS"))
+  
+  df
+}
 
-saveRDS(non_CPR_hits,file.path(path.expand(DGE_dir), "non_CPR_sig_genes.rds"))
-
-sapply(non_CPR_hits, nrow)
-
-# ------------With interaction term in the design matrix - to see if histology effects could be modelled specific to each molecular group - Likelihood Ratio Test -------------
-
-# Applying interactions isnt full rank as a few Molecular groups do not carry all histology types- so dropping the zero count/less count cells
-
-int<-paste(test_pheno$Group, test_pheno$Histology , sep = "_")
-
-int_tab<-table(int)
-
-int <- int %>% names(int_table)[int_tab > 4]
-
-pheno_i<-droplevels(test_pheno[int,])
-
-pheno_i$int<-droplevels(as.factor(paste(pheno_i$Group, pheno_i$Histology, sep = "_")))
-
-table(pheno_i$Group,pheno_i$Histology)
-
-full_model <- ~Batch + int
-
-reduced_model <- ~Batch + Group + Histology
-
-m_full<-model.matrix(full, pheno_i)
-
-m_red<-model.matrix(reduced, pheno_i)
-
-stopifnot(qr(m_full)$rank == ncol(m_full), qr(m_red)$rank == ncol(m_red))
-
-#-----Likelihood Ratio Test--------------
-
-genes_i<-rownames(dds)
-
-dds_i_non_CPR<-DESeqDataSetFromMatrix(counData = test_counts[genes_i, pheno_i$Sample_ID],
-                              colData = pheno_i,
-                              design = full_model)
-
-dds_lrt<-DESeq(dds_i, test = "LRT", reduced = reduced_model)
-
-res_int<-results(dds_lrt)
-
-# Checking p-values
-
-hist(res_int$pvalue, breaks = 50)
-
-sum(res_int$padj < 0.1, na.rm = TRUE)
-
-res_int<-res_int[order(res_int$padj),]
-
-head(res_int$stat)
+sig_hits <- function(df,padj_cutoff, lfc_threshold) {
+  
+  df <- DGE_change(df, padj_cutoff = padj_cutoff, lfc_threshold = lfc_threshold)
+  
+  df <- df[df$status != "NS", ]
+  
+  df[order(df$padj), ]
+}
 
 
-dds_w <- DESeq(dds_i)
+volcano_plot <- function(df, title, lfc_threshold, padj_cutoff, n_label = 10) {
+  
+  df <- DGE_change(df,padj_cutoff = padj_cutoff,lfc_threshold = lfc_threshold)
+  
+  df <- df[!is.na(df$padj) & !is.na(df$log2FC), ]
+  
+  df$nlp <- -log10(pmax(df$padj, 1e-300))
 
-tabc  <- table(pheno_i$Group, pheno_i$Histology)
-pairs <- list(c("DN", "CLA"), c("LCA", "CLA"), c("LCA", "DN"))
+  lab <- head(sig_hits(df, padj_cutoff = padj_cutoff, lfc_threshold = lfc_threshold), n_label)
+  
+  lab$nlp <- -log10(pmax(lab$padj, 1e-300))
+  
+  ggplot(df, aes(log2FC, nlp, colour = status)) +
+    geom_point(alpha = 0.5, size = 1) +
+    scale_colour_manual(values = status_cols) +
+    geom_vline(xintercept = c(-lfc_threshold, lfc_threshold), linetype = "dashed") +
+    geom_hline(yintercept = -log10(padj_cutoff), linetype = "dashed") +
+    geom_text_repel(data = lab, aes(label = gene), colour = "black",
+                    size = 3, max.overlaps = Inf) +
+    labs(title = gsub("_", " ", title),
+         subtitle = sprintf("Up: %d | Down: %d  (padj < %g, |shrunk log2FC| > %g)",
+                            sum(df$status == "Up"), sum(df$status == "Down"),
+                            padj_cutoff, lfc_threshold),
+         x = "Shrunk log2 fold change",
+         y = "-log10 adjusted p-value", colour = NULL) +
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          axis.title = element_text(hjust = 0.5, face = "bold"))
+}
 
-cts <- list()
-for (g in rownames(tabc))
-  for (p in pairs)
-    if (all(tabc[g, p] >= min_cell))
-      cts[[paste(g, p[1], "vs", p[2], sep = "_")]] <-
-  c("GH", paste(g, p[1], sep = "_"), paste(g, p[2], sep = "_"))
-names(cts)
+ma_plot <- function(dfs,lfc_threshold,padj_cutoff) {
+  
+  df <- do.call(rbind, lapply(names(dfs), function(n)
+    data.frame(DGE_change(dfs[[n]],lfc_threshold = lfc_threshold,padj_cutoff = padj_cutoff), contrast = n)))
+  
+  df <- df[!is.na(df$log2FC), ]
+  
+  ggplot(df, aes(log10(baseMean + 1), log2FC, colour = status)) +
+    geom_point(alpha = 0.4, size = 0.7) +
+    scale_colour_manual(values = status_cols) +
+    geom_hline(yintercept = 0) +
+    facet_wrap(~contrast) +
+    labs(x = "log10(mean normalised count + 1)", y = "Shrunk log2 fold change",
+         colour = NULL) +
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          axis.title = element_text(hjust = 0.5, face = "bold"))
+}
 
-res_gh <- lapply(cts, function(ct)
-  lfcShrink(dds_w, contrast = ct,
-            res = results(dds_w, contrast = ct, alpha = 0.05),
-            type = "ashr", quiet = TRUE))
-sapply(res_gh, function(r) sum(r$padj < 0.05 & abs(r$log2FoldChange) > 1, na.rm = TRUE))
+pval_hist <- function(dfs) {
+  
+  df <- do.call(rbind, lapply(names(dfs), function(n)
+    data.frame(pvalue = dfs[[n]]$pvalue, contrast = n)))
+  
+  ggplot(df[!is.na(df$pvalue), ], aes(pvalue)) +
+    geom_histogram(bins = 50, fill = "grey60", colour = "white") +
+    facet_wrap(~contrast) +
+    labs(title = "Raw p-value histograms",
+         subtitle = "Healthy: flat bulk plus a spike near 0",
+         x = "p-value", y = "Genes") +
+    theme_bw()
+}
+
+count_plot <- function(dfs, title,padj_cutoff, lfc_threshold) {
+  
+  df <- do.call(rbind, lapply(names(dfs), function(n) {
+    
+    t <- DGE_change(dfs[[n]],padj_cutoff = padj_cutoff,lfc_threshold = lfc_threshold)
+    data.frame(contrast = n, direction = c("Up", "Down"),
+               n = c(sum(t$status == "Up"), -sum(t$status == "Down")))
+  }))
+  
+  ggplot(df, aes(contrast, n, fill = direction)) +
+    geom_col() + geom_hline(yintercept = 0) +
+    scale_fill_manual(values = c(Up = "firebrick", Down = "steelblue")) +
+    coord_flip() +
+    labs(title = title, x = NULL, fill = NULL,
+         y = "Significant genes") +
+    theme_bw()
+}
+
+pca_plot <- function(mat, pheno, colour, shape = NULL, title = "") {
+  
+  top <- order(apply(mat, 1, var), decreasing = TRUE)[seq_len(min(1000, nrow(mat)))]
+  
+  pc  <- prcomp(t(mat[top, ]))
+  
+  pv  <- round(100 * pc$sdev^2 / sum(pc$sdev^2), 1)
+  
+  df  <- data.frame(PC1 = pc$x[, 1], PC2 = pc$x[, 2],
+                    pheno[rownames(pc$x), c("Histology", "Group", "Batch")])
+  
+  p <- ggplot(df, aes(PC1, PC2, colour = .data[[colour]])) +
+    geom_point(size = 2.5, alpha = 0.85) +
+    labs(title = title, x = paste0("PC1 (", pv[1], "%)"),
+         y = paste0("PC2 (", pv[2], "%)")) +
+    theme_bw()
+  if (!is.null(shape)) p <- p + aes(shape = .data[[shape]])
+  
+  p
+}
+
+box_genes <- function(mat, pheno, genes, facet_by_group = FALSE) {
+  
+  pheno <- droplevels(pheno)
+  
+  df <- do.call(rbind, lapply(genes, function(g)
+    data.frame(gene = g, expr = as.numeric(mat[g, rownames(pheno)]),
+               pheno[, c("Histology", "Group", "Batch")], row.names = NULL)))
+  
+  df$gene <- factor(df$gene, levels = genes)
+  
+  if (!facet_by_group) {
+    
+    n <- table(pheno$Histology)
+    
+    df$Histology <- factor(df$Histology, levels = names(n),
+                           labels = paste0(names(n), "\n(n=", n, ")"))
+  }
+  
+  p <- ggplot(df, aes(Histology, expr)) +
+    geom_boxplot(aes(fill = Histology), outlier.shape = NA, alpha = 0.4,
+                 show.legend = FALSE) +
+    geom_jitter(aes(colour = Group), width = 0.15, size = 1.6, alpha = 0.8) +
+    labs(y = "VST expression", x = NULL) +
+    theme_bw()
+  if (facet_by_group) p + facet_grid(gene ~ Group, scales = "free_y")
+  else                p + facet_wrap(~gene, scales = "free_y")
+}
+
+heatmap_top <- function(mat, pheno, genes, file) {
+  
+  m <- t(scale(t(mat[genes, rownames(pheno)])))
+  
+  m[m >  3] <-  3
+  
+  m[m < -3] <- -3
+  
+  pheatmap(m, annotation_col = pheno[, c("Histology", "Group", "Batch")],
+           show_colnames = FALSE, show_rownames = length(genes) <= 60,
+           clustering_method = "ward.D2", filename = file, width = 9, height = 10)
+}
+
+concordance_plot <- function(a, b, nm, lab_a = "NMB", lab_b = "non-CPR", padj_cutoff) {
+  
+  m <- merge(a[, c("gene", "log2FC", "padj")], b[, c("gene", "log2FC", "padj")],
+             by = "gene", suffixes = c(".a", ".b"))
+  
+  m <- m[complete.cases(m), ]
+  
+  rho <- cor(m$log2FC.a, m$log2FC.b, method = "spearman")
+  
+  m$sig <- ifelse(m$padj.a < padj_cutoff & m$padj.b < padj_cutoff, "Both",
+                  ifelse(m$padj.a < padj_cutoff, paste(lab_a, "only"),
+                         ifelse(m$padj.b < padj_cutoff, paste(lab_b, "only"), "Neither")))
+  
+  ggplot(m, aes(log2FC.a, log2FC.b, colour = sig)) +
+    geom_point(alpha = 0.5, size = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_abline(slope = 1, intercept = 0, colour = "grey40") +
+    labs(title = paste(gsub("_", " ", nm), "- agreement between cohorts"),
+         subtitle = sprintf("Spearman rho = %.2f (%d shared genes)", rho, nrow(m)),
+         x = paste(lab_a, "shrunk log2FC"), y = paste(lab_b, "shrunk log2FC"),
+         colour = NULL) +
+    theme_bw()
+}
+
+# ---------------------------- Custom Function for DGE --------------------------
+
+RNA_dir<-"~/Thesis_models/RNA_dir/"
+
+DGE_dir<-"~/Thesis_models/RNA_dir/DGE/"
+
+dir.create(DGE_dir, showWarnings = FALSE, recursive = TRUE)
+
+RNAseq_NMB<-readRDS(file.path(path.expand(RNA_dir), "RNAseq_NMB.rds"))
+
+RNAseq_combined<-readRDS(file.path(path.expand(RNA_dir), "RNAseq_combined.rds"))
+
+contrast_list <- list(
+  DN_vs_CLA  = c("Histology", "DN",  "CLA"),
+  LCA_vs_CLA = c("Histology", "LCA", "CLA"),
+  LCA_vs_DN  = c("Histology", "LCA", "DN")
+)
+
+status_cols <- c(Up = "firebrick", Down = "steelblue", NS = "grey75")
+
+GROUP_COLS <- c("WNT-MB"    = "blue",
+                "SHH-MB"    = "red3",
+                "Group3-MB" = "yellow3",
+                "Group4-MB" = "darkgreen")
+
+HISTO_COLS <- c("CLA"    = "purple",
+                "LCA"    = "pink3",
+                "DN" = "darkgreen")
+
+#---------Helper Functions for DGE--------------------------------
+
+check_cols <- function(cols, lv, what) {
+  if (is.null(cols)) return(NULL)
+  if (!all(lv %in% names(cols))) {
+    warning(what, ": no colour defined for level(s): ",
+            paste(setdiff(lv, names(cols)), collapse = ", "),
+            " -> using default colours. Names must match levels(pheno$", what, ").")
+    return(NULL)
+  }
+  cols
+}
+
+res_table <- function(raw, shrunk) {
+  df <- as.data.frame(raw)[, c("baseMean", "log2FoldChange", "pvalue", "padj")]
+  
+  names(df)[names(df) == "log2FoldChange"] <- "log2FC_raw"
+  
+  df$log2FC <- shrunk$log2FoldChange
+  
+  df$gene   <- rownames(df) 
+  
+  df
+}
+
+DGE_change <- function(df, lfc_threshold, padj_cutoff) {
+  
+  df$status <- "NS"
+  
+  ok <- !is.na(df$padj) & !is.na(df$log2FC) & df$padj < padj_cutoff
+  
+  df$status[ok & df$log2FC >  lfc_threshold] <- "Up"
+  
+  df$status[ok & df$log2FC < -lfc_threshold] <- "Down"
+  
+  df$status <- factor(df$status, levels = c("Up", "Down", "NS"))
+  
+  df
+}
+
+sig_hits <- function(df,padj_cutoff, lfc_threshold) {
+  
+  df <- DGE_change(df, padj_cutoff = padj_cutoff, lfc_threshold = lfc_threshold)
+  
+  df <- df[df$status != "NS", ]
+  
+  df[order(df$padj), ]
+}
 
 
+volcano_plot <- function(df, title, lfc_threshold, padj_cutoff, n_label = 10) {
+  
+  df <- DGE_change(df,padj_cutoff = padj_cutoff,lfc_threshold = lfc_threshold)
+  
+  df <- df[!is.na(df$padj) & !is.na(df$log2FC), ]
+  
+  df$nlp <- -log10(pmax(df$padj, 1e-300))
+  
+  lab <- head(sig_hits(df, padj_cutoff = padj_cutoff, lfc_threshold = lfc_threshold), n_label)
+  
+  lab$nlp <- -log10(pmax(lab$padj, 1e-300))
+  
+  ggplot(df, aes(log2FC, nlp, colour = status)) +
+    geom_point(alpha = 0.5, size = 1) +
+    scale_colour_manual(values = status_cols) +
+    geom_vline(xintercept = c(-lfc_threshold, lfc_threshold), linetype = "dashed") +
+    geom_hline(yintercept = -log10(padj_cutoff), linetype = "dashed") +
+    geom_text_repel(data = lab, aes(label = gene), colour = "black",
+                    size = 3, max.overlaps = Inf) +
+    labs(title = gsub("_", " ", title),
+         subtitle = sprintf("Up: %d | Down: %d  (padj < %g, |shrunk log2FC| > %g)",
+                            sum(df$status == "Up"), sum(df$status == "Down"),
+                            padj_cutoff, lfc_threshold),
+         x = "Shrunk log2 fold change",
+         y = "-log10 adjusted p-value", colour = NULL) +
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          axis.title = element_text(hjust = 0.5, face = "bold"))
+}
+
+ma_plot <- function(dfs,lfc_threshold,padj_cutoff) {
+  
+  df <- do.call(rbind, lapply(names(dfs), function(n)
+    data.frame(DGE_change(dfs[[n]],lfc_threshold = lfc_threshold,padj_cutoff = padj_cutoff), contrast = n)))
+  
+  df <- df[!is.na(df$log2FC), ]
+  
+  ggplot(df, aes(log10(baseMean + 1), log2FC, colour = status)) +
+    geom_point(alpha = 0.4, size = 0.7) +
+    scale_colour_manual(values = status_cols) +
+    geom_hline(yintercept = 0) +
+    facet_wrap(~contrast) +
+    labs(x = "log10(mean normalised count + 1)", y = "Shrunk log2 fold change",
+         colour = NULL) +
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          axis.title = element_text(hjust = 0.5, face = "bold"))
+}
+
+pval_hist <- function(dfs) {
+  
+  df <- do.call(rbind, lapply(names(dfs), function(n)
+    data.frame(pvalue = dfs[[n]]$pvalue, contrast = n)))
+  
+  ggplot(df[!is.na(df$pvalue), ], aes(pvalue)) +
+    geom_histogram(bins = 50, fill = "grey60", colour = "white") +
+    facet_wrap(~contrast) +
+    labs(title = "Raw p-value histograms",
+         subtitle = "Healthy: flat bulk plus a spike near 0",
+         x = "p-value", y = "Genes") +
+    theme_bw()
+}
+
+count_plot <- function(dfs, title,padj_cutoff, lfc_threshold) {
+  
+  df <- do.call(rbind, lapply(names(dfs), function(n) {
+    
+    t <- DGE_change(dfs[[n]],padj_cutoff = padj_cutoff,lfc_threshold = lfc_threshold)
+    data.frame(contrast = n, direction = c("Up", "Down"),
+               n = c(sum(t$status == "Up"), -sum(t$status == "Down")))
+  }))
+  
+  ggplot(df, aes(contrast, n, fill = direction)) +
+    geom_col() + geom_hline(yintercept = 0) +
+    scale_fill_manual(values = c(Up = "firebrick", Down = "steelblue")) +
+    coord_flip() +
+    labs(title = title, x = NULL, fill = NULL,
+         y = "Significant genes") +
+    theme_bw()
+}
+
+pca_plot <- function(mat, pheno, colour, shape = NULL, title = "", cols = NULL) {
+  
+  top <- order(apply(mat, 1, var), decreasing = TRUE)[seq_len(min(1000, nrow(mat)))]
+  
+  pc  <- prcomp(t(mat[top, ]))
+  
+  pv  <- round(100 * pc$sdev^2 / sum(pc$sdev^2), 1)
+  
+  df  <- data.frame(PC1 = pc$x[, 1], PC2 = pc$x[, 2],
+                    pheno[rownames(pc$x), c("Histology", "Group", "Batch")])
+  
+  p <- ggplot(df, aes(PC1, PC2, colour = .data[[colour]])) +
+    geom_point(size = 2.5, alpha = 0.85) +
+    labs(title = title, x = paste0("PC1 (", pv[1], "%)"),
+         y = paste0("PC2 (", pv[2], "%)")) +
+    theme_bw()
+  if (!is.null(shape)) p <- p + aes(shape = .data[[shape]])
+  
+  if (!is.null(cols)) p <- p + scale_colour_manual(values = cols)   # CHANGED
+  
+  p
+}
+
+box_genes <- function(mat, pheno, genes, facet_by_group = FALSE,
+                      histo_cols = NULL, group_cols = NULL) {
+  
+  pheno <- droplevels(pheno)
+  
+  df <- do.call(rbind, lapply(genes, function(g)
+    data.frame(gene = g, expr = as.numeric(mat[g, rownames(pheno)]),
+               pheno[, c("Histology", "Group", "Batch")], row.names = NULL)))
+  
+  df$gene <- factor(df$gene, levels = genes)
+  
+  if (!facet_by_group) {
+    
+    n <- table(pheno$Histology)
+    
+    df$Histology <- factor(df$Histology, levels = names(n),
+                           labels = paste0(names(n), "\n(n=", n, ")"))
+  }
+  
+  p <- ggplot(df, aes(Histology, expr)) +
+    geom_boxplot(aes(fill = Histology), outlier.shape = NA, alpha = 0.4,
+                 show.legend = FALSE) +
+    geom_jitter(aes(colour = Group), width = 0.15, size = 1.6, alpha = 0.8) +
+    labs(y = "VST expression", x = NULL) +
+    theme_bw()
+  
+  if (!is.null(histo_cols) && all(levels(pheno$Histology) %in% names(histo_cols))) {
+    fill_vals <- histo_cols[levels(pheno$Histology)]
+    names(fill_vals) <- levels(df$Histology)
+    p <- p + scale_fill_manual(values = fill_vals)
+  }
+  
+  if (!is.null(group_cols) && all(levels(pheno$Group) %in% names(group_cols)))
+    p <- p + scale_colour_manual(values = group_cols)
+  
+  if (facet_by_group) p + facet_grid(gene ~ Group, scales = "free_y")
+  else                p + facet_wrap(~gene, scales = "free_y")
+}
+
+heatmap_top <- function(mat, pheno, genes, file, histo_cols = NULL, group_cols = NULL) {
+  
+  m <- t(scale(t(mat[genes, rownames(pheno)])))
+  
+  m[m >  3] <-  3
+  
+  m[m < -3] <- -3
+  
+  ann_cols <- Filter(Negate(is.null), list(Histology = histo_cols, Group = group_cols))  
+  
+  pheatmap(m, annotation_col = pheno[, c("Histology", "Group", "Batch")],
+           annotation_colors = if (length(ann_cols) > 0) ann_cols else NA,                
+           show_colnames = FALSE, show_rownames = length(genes) <= 60,
+           clustering_method = "ward.D2", filename = file, width = 9, height = 10)
+}
+
+concordance_plot <- function(a, b, nm, lab_a = "NMB", lab_b = "non-CPR", padj_cutoff) {
+  
+  m <- merge(a[, c("gene", "log2FC", "padj")], b[, c("gene", "log2FC", "padj")],
+             by = "gene", suffixes = c(".a", ".b"))
+  
+  m <- m[complete.cases(m), ]
+  
+  rho <- cor(m$log2FC.a, m$log2FC.b, method = "spearman")
+  
+  m$sig <- ifelse(m$padj.a < padj_cutoff & m$padj.b < padj_cutoff, "Both",
+                  ifelse(m$padj.a < padj_cutoff, paste(lab_a, "only"),
+                         ifelse(m$padj.b < padj_cutoff, paste(lab_b, "only"), "Neither")))
+  
+  ggplot(m, aes(log2FC.a, log2FC.b, colour = sig)) +
+    geom_point(alpha = 0.5, size = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_abline(slope = 1, intercept = 0, colour = "grey40") +
+    labs(title = paste(gsub("_", " ", nm), "- agreement between cohorts"),
+         subtitle = sprintf("Spearman rho = %.2f (%d shared genes)", rho, nrow(m)),
+         x = paste(lab_a, "shrunk log2FC"), y = paste(lab_b, "shrunk log2FC"),
+         colour = NULL) +
+    theme_bw()
+}
+
+# ---------------------------- Custom Function for DGE --------------------------
+
+run_dge <- function(se, label, lfc_threshold, padj_cutoff, include_batch = TRUE) {
+  
+  out_dir <- file.path(DGE_dir, label) 
+  
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  required_pgs <- c("dplyr", "limma","ggplot2","multcompView","ggpubr","scales", "ggplot2","tidyr", "ashr", "ggrepel","pheatmap")
+  
+  required_bioc_pgs<-c("sva","DESeq2","edgeR","BatchQC", "biomaRt","org.Hs.eg.db")
+  
+  missing_pgs  <- required_pgs[!sapply(required_pgs, requireNamespace, quietly = TRUE)]
+  
+  missing_bioc_pgs  <- required_bioc_pgs[!sapply(required_bioc_pgs, requireNamespace, quietly = TRUE)]
+  
+  if (length(missing_pgs) > 0) install.packages(missing_pgs, dependencies = TRUE)
+  
+  if (length(missing_bioc_pgs) > 0) BiocManager::install(missing_bioc_pgs)
+  
+  invisible(sapply(required_pgs, library, character.only = TRUE, quietly = TRUE))
+  
+  invisible(sapply(required_bioc_pgs, library, character.only = TRUE, quietly = TRUE))
+  
+  
+  pheno <- as.data.frame(colData(se))
+  
+  pheno <- pheno[!is.na(pheno$Group) & !is.na(pheno$Histology) &
+                   pheno$Group != "MBNOS", ]
+  
+  pheno$Group     <- factor(make.names(as.character(pheno$Group)))
+  
+  pheno$Histology <- relevel(factor(pheno$Histology), ref = "CLA")  # CLA = baseline
+  
+  pheno$Batch     <- factor(pheno$Batch)
+  
+  pheno <- droplevels(pheno)
+  
+  ids <- as.character(pheno$Sample_ID)
+  
+  rownames(pheno) <- ids
+  
+  print(table(pheno$Group, pheno$Histology))
+  
+  cnt <- as.matrix(counts(se))[, ids]
+  
+  if (include_batch) {design_DGE <- ~ Batch + Group + Histology } else { 
+    
+    design_DGE <- ~ Group + Histology }
+  
+  mm <- model.matrix(design_DGE, pheno)
+  
+  stopifnot(qr(mm)$rank == ncol(mm))          # design should be full rank
+  
+  dds  <- DESeqDataSetFromMatrix(countData = cnt, colData = pheno, design = design_DGE)
+  
+  dds  <- DESeq(dds)
+  
+  pdf(file.path(out_dir, "dispersion.pdf")); plotDispEsts(dds); invisible(dev.off())
+  
+  raw <- lapply(contrast_list, function(ct) results(dds, contrast = ct, alpha = padj_cutoff))
+  
+  shrunk <- Map(function(ct, r)
+    lfcShrink(dds, contrast = ct, res = r, type = "ashr", quiet = TRUE),
+    contrast_list, raw)
+  
+  for (n in names(raw)) { cat("\n", label, n, "\n"); summary(raw[[n]]) }
+  
+  tabs <- Map(res_table, raw, shrunk)
+  
+  hits <- lapply(tabs, function(tab) sig_hits(tab, padj_cutoff = padj_cutoff, lfc_threshold = lfc_threshold))
+  
+  print(sapply(hits, nrow))
+  
+  vsd <- vst(dds, blind = TRUE)
+  
+  mat <- assay(vsd)
+  
+  mat_adj <- if (nlevels(pheno$Batch) > 1) {
+    removeBatchEffect(mat, batch = pheno$Batch,
+                      design = model.matrix(~ Group + Histology, pheno))
+  } else mat
+  
+  GROUP_COLS <- c("WNT-MB"    = "blue",
+                  "SHH-MB"    = "red3",
+                  "Group3-MB" = "yellow3",
+                  "Group4-MB" = "darkgreen")
+  
+  names(GROUP_COLS) <- make.names(names(GROUP_COLS))   
+  
+  HISTO_COLS <- c(CLA = "purple", LCA = "pink3", DN = "darkgreen")
+  
+  GROUP_COLS <- check_cols(GROUP_COLS, levels(pheno$Group),     "Group")
+  HISTO_COLS <- check_cols(HISTO_COLS, levels(pheno$Histology), "Histology")
+  
+  for (v in c("Histology", "Group", "Batch")) {
+    
+    if (v == "Group") {
+      COL <- GROUP_COLS
+    } else if (v == "Histology") {
+      COL <- HISTO_COLS
+    } else {
+      COL <- NULL      
+    }
+        ggsave(filename = file.path(out_dir, paste0("pca_by_", v, ".pdf")),
+           plot = pca_plot(mat, pheno, v, shape = if (v == "Batch") NULL else "Batch",
+                           title = paste(label, "PCA (VST, before batch adjustment)"),
+                           cols = COL),
+           width = 6.5, height = 5)
+    
+  }   
+  
+  ggsave(filename = file.path(out_dir, "pca_batch_adjusted.pdf"),
+         plot = pca_plot(mat_adj, pheno, "Histology", shape = "Group",
+                         title = paste(label, "PCA (batch-adjusted)"),
+                         cols = HISTO_COLS),                                   
+         width = 6.5, height = 5)
+  
+  ggsave(filename = file.path(out_dir, "pvalue_histograms.pdf"),
+         plot = pval_hist(tabs), width = 9, height = 4)
+  
+  ggsave(filename = file.path(out_dir, "ma_plots.pdf"),
+         plot = ma_plot(tabs, lfc_threshold = lfc_threshold, padj_cutoff = padj_cutoff),
+         width = 10, height = 4)
+  
+  ggsave(filename = file.path(out_dir, "significant_gene_counts.pdf"),
+         plot = count_plot(tabs, paste(label, "- significant genes per contrast"),
+                           padj_cutoff = padj_cutoff, lfc_threshold = lfc_threshold),
+         width = 6.5, height = 3.5)
+  
+  
+  for (nm in names(tabs)) {
+    ggsave(filename = file.path(out_dir, paste0("volcano_", nm, ".pdf")),
+           plot = volcano_plot(tabs[[nm]], nm, lfc_threshold = lfc_threshold, padj_cutoff = padj_cutoff),
+           width = 6.5, height = 5.5)
+    
+    top <- head(hits[[nm]]$gene, 6)
+    
+    if (length(top) > 0) {
+      ph <- pheno[pheno$Histology %in% contrast_list[[nm]][2:3], ]
+      ggsave(filename = file.path(out_dir, paste0("boxplot_top_", nm, ".pdf")),
+             plot = box_genes(mat_adj, ph, top,
+                              histo_cols = HISTO_COLS, group_cols = GROUP_COLS),   
+             width = 9, height = 6)
+    }
+  }
+  
+  hm_genes <- unique(unlist(lapply(hits, function(h) head(h$gene, 25))))
+  
+  if (length(hm_genes) > 1)
+    heatmap_top(mat_adj, pheno, hm_genes, file.path(out_dir, "heatmap_top_hits.pdf"),
+                histo_cols = HISTO_COLS, group_cols = GROUP_COLS)                  
+  
+  ## ------------With interaction term in the design matrix - to see if histology effects could be modelled specific to each molecular group - Likelihood Ratio Test -------------
+  
+  # Applying interactions isnt full rank as a few Molecular groups do not carry all histology types- so dropping the zero count/less count cells
+  
+  cell     <- paste(pheno$Group, pheno$Histology, sep = "_")
+  
+  cell_tab <- table(cell)
+  
+  pheno_i  <- droplevels(pheno[cell %in% names(cell_tab)[cell_tab >= 5], ])
+  
+  pheno_i$GH <- factor(paste(pheno_i$Group, pheno_i$Histology, sep = "_"))
+  
+  print(table(pheno_i$Group, pheno_i$Histology))
+  
+  full_model    <- ~ Batch + GH
+  
+  reduced_model <- ~ Batch + Group + Histology
+  
+  m_full <- model.matrix(full_model, pheno_i)
+  
+  m_red  <- model.matrix(reduced_model, pheno_i)
+  
+  lrt_res <- NULL; gh_tabs <- NULL
+  
+  if (qr(m_full)$rank == ncol(m_full) && qr(m_red)$rank == ncol(m_red)) {
+    
+    dds_i <- DESeqDataSetFromMatrix(
+      countData = cnt[rownames(dds), rownames(pheno_i)],
+      colData = pheno_i, design = full_model)
+    
+    dds_lrt <- DESeq(dds_i, test = "LRT", full = m_full, reduced = m_red)
+    
+    lrt_res <- results(dds_lrt)
+    
+    lrt_res <- lrt_res[order(lrt_res$padj), ]
+    
+    message(label, ": LRT genes with padj < 0.1 = ",
+            sum(lrt_res$padj < 0.1, na.rm = TRUE))
+    
+    ggsave(filename = file.path(out_dir, "lrt_pvalue_histogram.pdf"),
+           plot = ggplot(data.frame(pvalue = lrt_res$pvalue[!is.na(lrt_res$pvalue)]), aes(pvalue)) +
+             geom_histogram(bins = 50, fill = "grey60", colour = "white") +
+             labs(title = paste(label, "- LRT (interaction) p-values"), y = "Genes") +
+             theme_bw(),
+           width = 6, height = 4)
+    
+    top_int <- head(rownames(lrt_res)[!is.na(lrt_res$padj) & lrt_res$padj < 0.1], 4)
+    
+    if (length(top_int) > 0)
+      ggsave(filename = file.path(out_dir, "lrt_top_interaction_genes.pdf"),
+             plot = box_genes(mat_adj, pheno_i, top_int, facet_by_group = TRUE,
+                              histo_cols = HISTO_COLS, group_cols = GROUP_COLS),  
+             width = 9, height = 8)
+    
+    dds_w <- DESeq(dds_i)
+    
+    tabc  <- table(pheno_i$Group, pheno_i$Histology)
+    
+    pairs <- list(c("DN", "CLA"), c("LCA", "CLA"), c("LCA", "DN"))
+    
+    cts <- list()
+    
+    for (g in rownames(tabc)) for (p in pairs)
+      
+      if (all(p %in% colnames(tabc)) && all(tabc[g, p] >= 5))
+        
+        cts[[paste(g, p[1], "vs", p[2], sep = "_")]] <-
+      c("GH", paste(g, p[1], sep = "_"), paste(g, p[2], sep = "_"))
+    
+    if (length(cts) > 0) {
+      
+      gh_raw <- lapply(cts, function(ct) results(dds_w, contrast = ct, alpha = padj_cutoff))
+      
+      gh_shr <- Map(function(ct, r)
+        lfcShrink(dds_w, contrast = ct, res = r, type = "ashr", quiet = TRUE), cts, gh_raw)
+      
+      gh_tabs <- Map(res_table, gh_raw, gh_shr)
+      
+      print(sapply(gh_tabs, function(t) nrow(sig_hits(t,padj_cutoff = padj_cutoff, lfc_threshold = lfc_threshold))))
+      
+      for (nm in names(gh_tabs))
+        
+        ggsave(filename = file.path(out_dir, paste0("volcano_groupspecific_", nm, ".pdf")),
+               plot = volcano_plot(gh_tabs[[nm]], nm, padj_cutoff = padj_cutoff, lfc_threshold = lfc_threshold),
+               width = 6.5, height = 5.5)
+      
+      ggsave(filename = file.path(out_dir, "groupspecific_gene_counts.pdf"),
+             plot = count_plot(gh_tabs, paste(label, "- group-specific contrasts"),
+                               padj_cutoff = padj_cutoff, lfc_threshold = lfc_threshold),
+             width = 7, height = 4)
+    }
+  } else {
+    warning(label, ": interaction design not full rank after dropping small cells; ",
+            "LRT skipped")
+  }
+  
+  list(pheno = pheno, dds = dds, raw = raw, shrunk = shrunk, tabs = tabs,
+       hits = hits, mat = mat, mat_adj = mat_adj, lrt = lrt_res, gh_tabs = gh_tabs)
+}
 
 
+NMB <- run_dge(train_RNAseq, "NMB", lfc_threshold = 1, padj_cutoff = 0.05)
+
+Non_CPR <- run_dge(test_RNAseq, "non_CPR", lfc_threshold = 1, padj_cutoff = 0.05)
+
+Non_CPR_bc<-run_dge(test_RNAseq_bc, "non_CPR_bc", lfc_threshold = 1, padj_cutoff = 0.05, include_batch =  FALSE)
+
+saveRDS(NMB$hits,     file.path(path.expand(DGE_dir), "NMB_sig_genes.rds"))
+
+saveRDS(Non_CPR$hits, file.path(path.expand(DGE_dir), "non_CPR_sig_genes.rds"))
+
+saveRDS(list(NMB = NMB$tabs, non_CPR = Non_CPR$tabs),
+        file.path(path.expand(DGE_dir), "all_DGE_tables.rds"))
+
+# ------ Cross-cohort agreement -----------
+
+for (nm in names(contrast_list))
+  ggsave(filename = file.path(DGE_dir, paste0("concordance_", nm, ".pdf")),
+         plot = concordance_plot(NMB$tabs[[nm]], Non_CPR$tabs[[nm]], nm, padj_cutoff = 0.05),
+         width = 6, height = 5.5)
+
+lrt_n <- as.data.frame(NMB$lrt)
+lrt_c <- as.data.frame(Non_CPR$lrt)
+
+shared <- intersect(rownames(lrt_n)[!is.na(lrt_n$padj)],
+                    rownames(lrt_c)[!is.na(lrt_c$padj)])
+
+sig_n <- intersect(shared, rownames(lrt_n)[lrt_n$padj < 0.1])
+
+sig_c <- intersect(shared, rownames(lrt_c)[lrt_c$padj < 0.1])
+
+both  <- intersect(sig_n, sig_c)
+
+length(shared); length(sig_n); length(sig_c); length(both)
+
+length(sig_n) * length(sig_c) / length(shared)
+
+tab <- table(NMB = factor(shared %in% sig_n, c(FALSE, TRUE)),
+             nonCPR = factor(shared %in% sig_c, c(FALSE, TRUE)))
+
+fisher.test(tab)
+
+cor(lrt_n[shared, "stat"], lrt_c[shared, "stat"], method = "spearman")
+
+common <- intersect(names(NMB$gh_tabs), names(Non_CPR$gh_tabs))
+common
+
+for (nm in common)
+  print(concordance_plot(NMB$gh_tabs[[nm]], Non_CPR$gh_tabs[[nm]], nm, padj_cutoff = 0.05))
 
 
+for (nm in common) {
+  a <- NMB$gh_tabs[[nm]];  b <- Non_CPR$gh_tabs[[nm]]
+  m <- merge(a[, c("gene", "log2FC", "padj")], b[, c("gene", "log2FC", "padj")],
+             by = "gene", suffixes = c(".n", ".c"))
+  m <- m[complete.cases(m), ]
+  
+  disc  <- m$padj.n < 0.05 & abs(m$log2FC.n) > 1      
+  agree <- sign(m$log2FC.n[disc]) == sign(m$log2FC.c[disc])
+  
+  cat(nm, "| NMB hits:", sum(disc),
+      "| same direction in non-CPR:", round(100 * mean(agree)), "%\n")
+}
 
+# -------- LASSO Feature Selection ----------------------
 
+library(glmnet)
 
+RNA_dir<-"~/Thesis_models/RNA_dir/"
 
+LASSO_RNA_dir<-"~/Thesis_models/RNA_dir/LASSO/"
 
+dir.create(LASSO_RNA_dir, showWarnings = FALSE, recursive = TRUE) 
+
+vst_train<-readRDS(file.path(path.expand(RNA_dir), "Train_RNAseq_vst.rds")) 
+
+train_NMB_mat<- readRDS(file.path(path.expand(RNA_dir), "Train_RNAseq.rds"))
+
+train_pheno<-as.data.frame(colData(vst_train))
+
+set.seed(42)
+
+x_train <- as.matrix(train_NMB_mat[,!colnames(train_NMB_mat) %in% "histo"])
+
+if(all(rownames(x_train) == train_pheno$Sample_ID)) { y_train<- as.factor(train_pheno$Histology) 
+
+} else {
+  
+  train_pheno<-train_pheno[match(rownames(x_train), train_pheno$Sample_ID),]
+  
+  y_train<- as.factor(train_pheno$Histology) }
+
+cv.lasso <- cv.glmnet(
+  x = x_train,
+  y = y_train,
+  nfolds = 5,
+  family = "multinomial",
+  alpha = 1,
+  type.measure = "class"
+)
+
+selected_features <- unique(unlist(
+  lapply(coef(cv.lasso, s = "lambda.min"), function(m) {
+    rownames(m)[which(m[, 1] != 0)]
+  })
+))
+
+selected_features <- setdiff(selected_features, "(Intercept)") 
+
+saveRDS(selected_features,file.path(path.expand(LASSO_RNA_dir), "Train_RNAseq_Lasso_features.rds"))
+
+cat("Number of features selected by LASSO:", length(selected_features), "\n")
+
+train_df <- data.frame(x_train[, selected_features, drop = FALSE])
+
+saveRDS(train_df, file = file.path(path.expand(LASSO_RNA_dir), "LASSO_RNAseq.rds") )
 
 
 
